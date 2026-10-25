@@ -37,6 +37,7 @@ def connect(path):
         CREATE TABLE purchases(event_id TEXT PRIMARY KEY, order_id TEXT, product_id TEXT,
           user_id TEXT, time TEXT, quantity INTEGER, returned INTEGER DEFAULT 0);
         CREATE TABLE payments(order_id TEXT PRIMARY KEY, success_time TEXT);
+        CREATE TABLE flags(kind TEXT, value TEXT, reason TEXT, PRIMARY KEY(kind, value));
     ''')
     return db
 
@@ -168,8 +169,23 @@ def controlled_events(db, run, seed, start):
 SCENARIO_SIZE = 13  # 5 pagos + 4 compras + devolución + reseña + búsqueda + reenvío
 
 
-def prepare(source, output, size, config):
+def export_events(db, output, output_format, batch_size):
+    """Escribe el stream ordenado por (event_time, secuencia estable)."""
+    rows = db.execute('SELECT payload FROM events ORDER BY time,seq')
+    if output_format == 'jsonl':
+        with (output / 'events.jsonl').open('w', encoding='utf-8') as stream:
+            for (payload,) in rows:
+                stream.write(payload + '\n')
+        return {'events.jsonl': None}
+    from .parquet_io import write_entities, write_events
+    write_events((json.loads(payload) for (payload,) in rows), output / 'events.parquet', batch_size)
+    return {'events.parquet': None, **write_entities(db, output, batch_size)}
+
+
+def prepare(source, output, size, config, output_format='jsonl', synthetic=None):
     source, output = Path(source).resolve(), Path(output).resolve()
+    if output_format not in {'jsonl', 'parquet'}:
+        raise ValueError('Formato de salida: jsonl o parquet')
     if size is not None and size < SCENARIO_SIZE + 2:
         raise ValueError(f'Tamaño mínimo: {SCENARIO_SIZE + 2}')
     if config['chunk_size'] <= 0 or config['order_window_minutes'] <= 0:
@@ -178,7 +194,9 @@ def prepare(source, output, size, config):
         raise ValueError('La salida debe estar separada del CSV')
     output.mkdir(parents=True, exist_ok=False)
     source_hash = digest_file(source)
-    run = stable_id(source_hash, size, json.dumps(config, sort_keys=True))
+    # Sin escenarios extra la identidad de la corrida queda igual que antes.
+    extra_identity = [json.dumps(synthetic, sort_keys=True)] if synthetic else []
+    run = stable_id(source_hash, size, json.dumps(config, sort_keys=True), *extra_identity)
     db = connect(output / 'entities.sqlite')
     writer = Writer(db)
     source_count = 0
@@ -186,8 +204,9 @@ def prepare(source, output, size, config):
     missing_sessions = 0
     candidates = 0
     conflicts = 0
-    last_time = None
+    first_time = last_time = None
     boundary_session = None
+    synthetic_summary = None
     try:
         with source.open(newline='', encoding='utf-8') as stream:
             reader = csv.DictReader(stream)
@@ -208,6 +227,7 @@ def prepare(source, output, size, config):
                 if last_time and time < last_time:
                     raise ValueError(f'Fila {row_id}: retroceso temporal')
                 last_time = time
+                first_time = first_time or time
                 session = row['user_session'] or f'syn:missing-session:{stable_id(source_hash, row_id)}'
                 event = envelope(run, 'src:event:' + stable_id(source_hash, row_id), time,
                                  row['event_type'], 'real', row['user_id'], session, row['product_id'])
@@ -260,25 +280,30 @@ def prepare(source, output, size, config):
             raise AssertionError('Reserva de escenarios inconsistente')
         for event in scenarios:
             writer.add(event)
+        if synthetic:
+            from .synthetic import generate
+            extra, synthetic_summary = generate(db, run, config['seed'], first_time, last_time, synthetic, envelope)
+            for event in extra:
+                writer.add(event)
         db.execute('CREATE INDEX events_time ON events(time,seq)')
         db.execute('CREATE INDEX events_identity ON events(event_id)')
         db.commit()
         validations = validate_dataset(db)
-        with (output / 'events.jsonl').open('w', encoding='utf-8') as stream:
-            for (payload,) in db.execute('SELECT payload FROM events ORDER BY time,seq'):
-                stream.write(payload + '\n')
+        artifacts = export_events(db, output, output_format, config['chunk_size'])
+        artifacts['entities.sqlite'] = None
         manifest = dict(schema_version='1.0', generation_run_id=run, seed=config['seed'], config=config,
                         source={'path': str(source), 'sha256': source_hash, 'rows_selected': source_count},
                         selection={'rule': 'chronological_prefix_plus_reserved_scenarios', 'requested_events': size,
-                                   'reserved_scenario_events': SCENARIO_SIZE, 'prefix_may_cut_sessions_or_orders': truncated,
+                                   'reserved_scenario_events': SCENARIO_SIZE, 'synthetic_config': synthetic,
+                                   'synthetic_summary': synthetic_summary, 'prefix_may_cut_sessions_or_orders': truncated,
                                    'last_source_row': boundary_session, 'dependency_policy': 'real_groups_are_prefix_only;controlled_orders_complete'},
                         counts={'total': writer.count, 'by_type': dict(writer.types), 'by_origin': dict(writer.origins),
                                 'synthetic_fraction': writer.origins['synthetic'] / writer.count,
                                 'source_duplicate_candidates': candidates, 'missing_sessions_isolated': missing_sessions,
                                 'catalog_changes': conflicts, 'quality_flags': dict(writer.quality)},
                         validation=validations, policies=POLICIES,
-                        artifacts={'events.jsonl': digest_file(output / 'events.jsonl'),
-                                   'entities.sqlite': digest_file(output / 'entities.sqlite')},
+                        output_format=output_format,
+                        artifacts={name: digest_file(output / name) for name in artifacts},
                         environment={'python': platform.python_version(), 'platform': platform.platform()},
                         code_sha256=digest_file(__file__))
         (output / 'manifest.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + '\n')
@@ -331,4 +356,6 @@ POLICIES = {
     'priority': 'failed payment=100; express=10; normal=0; evaluation labels never consulted',
     'timestamps': 'event_time preserved in UTC; ingested_at assigned by replay',
     'evaluation': 'injected labels evaluate simulation only; no real fraud claims',
+    'demo_synthetic': 'optional; syn: namespace; themed multi-product orders, returns, reviews, flagged entities, payment bursts and resends; fixed seed',
+    'parquet': 'timestamps as UTC timestamp[us]; money as decimal128(12,2); readers restore the textual contract',
 }

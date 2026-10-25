@@ -1,0 +1,7 @@
+"""API de servicios de comercio electrónico (demo funcional)."""
+import sys
+from pathlib import Path
+
+RAIZ = Path(__file__).resolve().parents[1]
+if str(RAIZ) not in sys.path:
+    sys.path.insert(0, str(RAIZ))  # permite importar src/ al ejecutar desde cualquier carpeta

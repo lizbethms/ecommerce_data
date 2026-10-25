@@ -1,0 +1,26 @@
+{
+  "seed": 2026,
+  "chunk_size": 2048,
+  "order_window_minutes": 30,
+  "queue_capacity": 128,
+  "rate": 10000,
+  "burst_size": 100,
+  "burst_interval": 0.05,
+  "historical_speed": 3600,
+  "sample": {
+    "target_rows": 5000,
+    "window_rows": 1000000,
+    "max_session_rows": 60,
+    "purchase_share": 0.6,
+    "guard_minutes": 30
+  },
+  "synthetic": {
+    "n_orders": 400,
+    "n_browse_sessions": 300,
+    "n_fraud_bursts": 12,
+    "n_flagged": 5,
+    "n_resends": 25,
+    "p_return": 0.08,
+    "p_review": 0.3
+  }
+}

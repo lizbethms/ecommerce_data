@@ -26,6 +26,17 @@ python3 scripts/stage0.py prepare --all-source --output data/prepared/master
 
 Cada versión de tamaño N contiene N−13 filas originales del prefijo temporal y 13 eventos reservados. El maestro conserva los 10 millones originales y añade 13 eventos. El CSV original permanece intacto. La selección queda explícita en cada manifiesto; las versiones pequeñas no pretenden representar todo el periodo ni su distribución global.
 
+## Demo funcional: muestra Parquet y API de servicios
+
+```sh
+pip install -r requirements.txt
+python scripts/stage0.py --config configs/sample.json sample --output data/prepared_5K
+uvicorn API_SERVICIOS.main:app --reload
+python -m API_SERVICIOS.cliente_trafico
+```
+
+`sample` copia 5.000 filas de `data/10M.csv` en `data/sample_5K.csv`. Toma sesiones completas de la ventana inicial (1M filas) y da más peso a las que tienen compras de varios productos. Después aplica la misma preparación y validación, más escenarios sintéticos de demostración (`src/data/synthetic.py`), y escribe en Parquet en `data/prepared_5K/`: `events.parquet`, `catalog`, `orders`, `inventory`, `purchases`, `payments` y `flags`, más `manifest.json`. `prepare --format parquet` y `replay --events ...parquet` también aceptan Parquet. La API y sus servicios se documentan en [API_SERVICIOS/README.md](API_SERVICIOS/README.md).
+
 ## Archivos y configuración
 
 - `src/data/`: contrato, validación, preparación con SQLite y manifiestos.

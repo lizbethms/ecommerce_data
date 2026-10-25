@@ -1,0 +1,7 @@
+# Fuente REES46 y artefactos regenerables
+data/*.csv
+data/prepared*/
+results/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

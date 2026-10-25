@@ -1,1 +1,6 @@
-# Etapa 0 utiliza exclusivamente la biblioteca estándar de Python >= 3.11.
+# Etapa 0 (prepare/replay en JSONL) utiliza solo la biblioteca estándar de Python >= 3.11.
+# Muestra Parquet y API de servicios:
+pyarrow>=26.0
+fastapi>=0.162
+uvicorn>=0.54
+httpx>=0.28  # cliente de tráfico y TestClient

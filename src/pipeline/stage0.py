@@ -19,6 +19,17 @@ def read_block(stream, size):
     return block
 
 
+def event_blocks(path, size):
+    """Bloques de eventos desde events.jsonl o events.parquet, con el mismo contrato."""
+    if path.suffix == '.parquet':
+        from src.data.parquet_io import iter_event_blocks
+        yield from iter_event_blocks(path, size)
+        return
+    with path.open(encoding='utf-8') as stream:
+        while block := read_block(stream, size):
+            yield block
+
+
 def write_block(stream, records):
     stream.writelines(json.dumps(record, ensure_ascii=False) + '\n' for record in records)
 
@@ -39,15 +50,15 @@ async def run_stage0(events_path, output_path, config, mode='unlimited', consume
     started = time.perf_counter()
 
     async def produce():
-        with events_path.open(encoding='utf-8') as stream:
-            while block := await asyncio.to_thread(read_block, stream, config['chunk_size']):
-                for event in block:
-                    await clock.wait(stats['produced'], event['event_time'])
-                    event = dict(event, ingested_at=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'))
-                    admitted = time.perf_counter()
-                    await fifo.put((event, admitted))
-                    stats['producer_wait_seconds'] += time.perf_counter() - admitted
-                    stats['produced'] += 1
+        blocks = event_blocks(events_path, config['chunk_size'])
+        while block := await asyncio.to_thread(next, blocks, None):
+            for event in block:
+                await clock.wait(stats['produced'], event['event_time'])
+                event = dict(event, ingested_at=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'))
+                admitted = time.perf_counter()
+                await fifo.put((event, admitted))
+                stats['producer_wait_seconds'] += time.perf_counter() - admitted
+                stats['produced'] += 1
         await fifo.put(sentinel)
 
     async def consume():

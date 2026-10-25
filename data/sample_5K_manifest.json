@@ -1,0 +1,29 @@
+{
+  "rule": "complete_sessions_from_chronological_window;purchase_sessions_weighted",
+  "source": "C:\\Users\\51941\\Documents\\Proyectos\\Maestria\\Algorithms\\Final\\proyecto_v2\\ecommerce_data\\data\\10M.csv",
+  "output": "C:\\Users\\51941\\Documents\\Proyectos\\Maestria\\Algorithms\\Final\\proyecto_v2\\ecommerce_data\\data\\sample_5K.csv",
+  "seed": 2026,
+  "window_rows": 1000000,
+  "window_last_time": "2019-10-01 16:56:07 UTC",
+  "guard_minutes": 30,
+  "max_session_rows": 60,
+  "purchase_share": 0.6,
+  "target_rows": 5000,
+  "rows_written": 5000,
+  "by_type": {
+    "view": 4187,
+    "cart": 215,
+    "purchase": 598
+  },
+  "sessions_available": {
+    "multi_purchase": 1079,
+    "single_purchase": 12781,
+    "browse": 201739
+  },
+  "sessions_chosen": {
+    "multi_purchase": 248,
+    "single_purchase": 1,
+    "browse": 512
+  },
+  "source_sha256": "7dc7516e957bb6a000b176950c466b62e9e6dd44302e1ed1426d00b1bd657f72"
+}
