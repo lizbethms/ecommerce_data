@@ -1,0 +1,1 @@
+"""Estructuras compartidas del pipeline."""

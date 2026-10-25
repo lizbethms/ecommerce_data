@@ -1,0 +1,1 @@
+"""Pipeline de comercio electrónico."""

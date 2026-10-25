@@ -1,0 +1,1 @@
+# Etapa 0 utiliza exclusivamente la biblioteca estándar de Python >= 3.11.
