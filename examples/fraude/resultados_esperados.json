@@ -1,0 +1,198 @@
+[
+  {
+    "evento_id": "syn:example:event:normal",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 1,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:flagged",
+    "estado": "procesado",
+    "decision": "revisar",
+    "estimacion": 1,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:0",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 1,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:1",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 2,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:2",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 3,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:3",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 4,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:4",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 5,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:5",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 6,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:6",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 7,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:7",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 8,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:8",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 9,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:9",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 10,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:10",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 11,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:11",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 12,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:12",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 13,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:13",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 14,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:14",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 15,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:15",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 16,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:16",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 17,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:17",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 18,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:18",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 19,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:19",
+    "estado": "procesado",
+    "decision": "revisar",
+    "estimacion": 20,
+    "conteo_exacto": 20
+  },
+  {
+    "evento_id": "syn:example:event:20",
+    "estado": "procesado",
+    "decision": "revisar",
+    "estimacion": 21,
+    "conteo_exacto": 21
+  },
+  {
+    "evento_id": "syn:example:event:21",
+    "estado": "procesado",
+    "decision": "revisar",
+    "estimacion": 22,
+    "conteo_exacto": 22
+  },
+  {
+    "evento_id": "syn:example:event:22",
+    "estado": "procesado",
+    "decision": "revisar",
+    "estimacion": 23,
+    "conteo_exacto": 23
+  },
+  {
+    "evento_id": "syn:example:event:23",
+    "estado": "procesado",
+    "decision": "revisar",
+    "estimacion": 24,
+    "conteo_exacto": 24
+  },
+  {
+    "evento_id": "syn:example:event:0",
+    "estado": "duplicado",
+    "decision": "continuar",
+    "estimacion": 1,
+    "conteo_exacto": null
+  },
+  {
+    "evento_id": "syn:example:event:expired",
+    "estado": "procesado",
+    "decision": "continuar",
+    "estimacion": 1,
+    "conteo_exacto": null
+  }
+]

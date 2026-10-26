@@ -22,14 +22,22 @@ def stable_id(*parts):
 def money(value):
     try:
         amount = Decimal(value)
+        if not amount.is_finite() or amount < 0 or amount != amount.quantize(Decimal('0.01')):
+            raise ValueError('Precio negativo, no finito o con más de dos decimales')
     except (InvalidOperation, TypeError):
         raise ValueError('Precio no convertible') from None
-    if not amount.is_finite() or amount < 0 or amount != amount.quantize(Decimal('0.01')):
-        raise ValueError('Precio negativo, no finito o con más de dos decimales')
     return format(amount, '.2f')
 
 
 def validate(event):
+    if not isinstance(event, dict):
+        raise ValueError('Evento debe ser un objeto')
+    for key in ('event_id', 'user_id', 'user_session', 'event_time', 'event_type'):
+        if not isinstance(event.get(key), str) or not event[key].strip():
+            raise ValueError(f'{key} debe ser texto no vacío')
+    for key in ('product_id', 'order_id', 'payment_attempt_id', 'payment_method_id', 'device_id'):
+        if event.get(key) is not None and (not isinstance(event[key], str) or not event[key].strip()):
+            raise ValueError(f'{key} debe ser un identificador textual')
     if event['event_type'] not in TYPES:
         raise ValueError('Tipo de evento desconocido')
     utc(event['event_time'])
@@ -40,13 +48,15 @@ def validate(event):
     if event.get('price') is not None:
         money(event['price'])
     if event['event_type'] in {'purchase', 'return'}:
-        if not event.get('order_id') or event.get('quantity', 0) <= 0:
+        if not event.get('order_id') or type(event.get('quantity')) is not int or event['quantity'] <= 0:
             raise ValueError('Orden y cantidad positiva requeridas')
     if event['event_type'] == 'return' and not event.get('original_purchase_event_id'):
         raise ValueError('Referencia de compra requerida')
     if event['event_type'] == 'payment_attempt':
         if any(not event.get(k) for k in ('order_id', 'payment_attempt_id', 'payment_method_id', 'device_id', 'payment_status')):
             raise ValueError('Pago incompleto')
+        if event['payment_status'] not in {'failed', 'succeeded', 'pending'}:
+            raise ValueError('Estado de pago inválido')
     if event['event_type'] == 'search' and not event.get('query'):
         raise ValueError('Consulta requerida')
     if event['event_type'] == 'review' and not 1 <= event.get('rating', 0) <= 5:

@@ -26,6 +26,7 @@ def main():
     selection.add_argument('--size', type=int)
     selection.add_argument('--all-source', action='store_true', help='Conservar todas las filas y añadir escenarios')
     build.add_argument('--output', type=Path, required=True)
+    build.add_argument('--profile', choices=['stage0', 'stage6'], default='stage0')
     replay = sub.add_parser('replay')
     replay.add_argument('--events', type=Path, required=True)
     replay.add_argument('--output', type=Path, required=True)
@@ -36,7 +37,7 @@ def main():
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
     if args.command == 'prepare':
-        result = prepare(args.source, args.output, args.size, config)
+        result = prepare(args.source, args.output, args.size, config, args.profile)
         print(json.dumps({'output': str(args.output), 'counts': result['counts'], 'validation': result['validation']}, indent=2))
     else:
         if args.capacity is not None:

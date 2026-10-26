@@ -1,0 +1,7 @@
+{
+  "capacity": 1000,
+  "false_positive_rate": 0.01,
+  "epsilon": 0.01,
+  "delta": 0.001,
+  "threshold": 20
+}

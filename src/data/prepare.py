@@ -168,10 +168,37 @@ def controlled_events(db, run, seed, start):
 SCENARIO_SIZE = 13  # 5 pagos + 4 compras + devolución + reseña + búsqueda + reenvío
 
 
-def prepare(source, output, size, config):
+def fraud_events(db, run, start):
+    """Ráfaga controlada, reenvío de pago y expiración seis minutos después."""
+    product = db.execute('SELECT product_id FROM catalog ORDER BY product_id LIMIT 1').fetchone()[0]
+    order = 'syn:order:fraud:' + stable_id(run)
+    db.execute('INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?, ?)',
+               (order, 'syn:user:fraud', 'syn:session:fraud', 'standard', None, 'controlled', 'synthetic'))
+    base = datetime.fromisoformat(start.replace('Z', '+00:00')).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    events = []
+    for index in range(25):
+        offset = index if index < 24 else 360
+        event = envelope(run, 'syn:event:fraud:' + stable_id(run, index),
+                         utc((base + timedelta(seconds=offset)).isoformat()), 'payment_attempt',
+                         'synthetic', 'syn:user:fraud', 'syn:session:fraud', product)
+        event.update(order_id=order, payment_attempt_id=f'syn:attempt:{run}:{index}',
+                     payment_method_id='syn:method:fraud', device_id='syn:device:burst',
+                     payment_status='failed', scenario_id='controlled-stage6',
+                     is_injected_anomaly=index < 24)
+        event['synthetic_fields'] = [key for key, value in event.items()
+                                     if value is not None and key != 'synthetic_fields']
+        events.append(event)
+    events.insert(24, dict(events[0], is_injected_duplicate=True))
+    return events
+
+
+def prepare(source, output, size, config, profile='stage0'):
     source, output = Path(source).resolve(), Path(output).resolve()
-    if size is not None and size < SCENARIO_SIZE + 2:
-        raise ValueError(f'Tamaño mínimo: {SCENARIO_SIZE + 2}')
+    if profile not in {'stage0', 'stage6'}:
+        raise ValueError('Perfil desconocido')
+    scenario_size = SCENARIO_SIZE if profile == 'stage0' else 39
+    if size is not None and size < scenario_size + 2:
+        raise ValueError(f'Tamaño mínimo: {scenario_size + 2}')
     if config['chunk_size'] <= 0 or config['order_window_minutes'] <= 0:
         raise ValueError('Bloque y ventana deben ser positivos')
     if output == source or source in output.parents:
@@ -179,10 +206,12 @@ def prepare(source, output, size, config):
     output.mkdir(parents=True, exist_ok=False)
     source_hash = digest_file(source)
     run = stable_id(source_hash, size, json.dumps(config, sort_keys=True))
+    if profile != 'stage0':
+        run = stable_id(run, profile)
     db = connect(output / 'entities.sqlite')
     writer = Writer(db)
     source_count = 0
-    selected_limit = None if size is None else size - SCENARIO_SIZE
+    selected_limit = None if size is None else size - scenario_size
     missing_sessions = 0
     candidates = 0
     conflicts = 0
@@ -256,7 +285,9 @@ def prepare(source, output, size, config):
         if not last_time:
             raise ValueError('Fuente vacía')
         scenarios = controlled_events(db, run, config['seed'], last_time)
-        if len(scenarios) != SCENARIO_SIZE:
+        if profile == 'stage6':
+            scenarios.extend(fraud_events(db, run, max(e['event_time'] for e in scenarios)))
+        if len(scenarios) != scenario_size:
             raise AssertionError('Reserva de escenarios inconsistente')
         for event in scenarios:
             writer.add(event)
@@ -267,10 +298,19 @@ def prepare(source, output, size, config):
         with (output / 'events.jsonl').open('w', encoding='utf-8') as stream:
             for (payload,) in db.execute('SELECT payload FROM events ORDER BY time,seq'):
                 stream.write(payload + '\n')
-        manifest = dict(schema_version='1.0', generation_run_id=run, seed=config['seed'], config=config,
+        extra_artifacts = {}
+        if profile == 'stage6':
+            with (output / 'entidades.csv').open('w', newline='', encoding='utf-8') as stream:
+                writer_csv = csv.writer(stream)
+                writer_csv.writerow(['tipo', 'identificador', 'motivo'])
+                writer_csv.writerows([['cuenta', 'syn:user:flagged', 'Caso sintético'],
+                                     ['dispositivo', 'syn:device:demo', 'Caso sintético'],
+                                     ['medio_pago', 'syn:method:flagged', 'Caso sintético']])
+            extra_artifacts['entidades.csv'] = digest_file(output / 'entidades.csv')
+        manifest = dict(schema_version='1.0', profile=profile, generation_run_id=run, seed=config['seed'], config=config,
                         source={'path': str(source), 'sha256': source_hash, 'rows_selected': source_count},
                         selection={'rule': 'chronological_prefix_plus_reserved_scenarios', 'requested_events': size,
-                                   'reserved_scenario_events': SCENARIO_SIZE, 'prefix_may_cut_sessions_or_orders': truncated,
+                                   'reserved_scenario_events': scenario_size, 'prefix_may_cut_sessions_or_orders': truncated,
                                    'last_source_row': boundary_session, 'dependency_policy': 'real_groups_are_prefix_only;controlled_orders_complete'},
                         counts={'total': writer.count, 'by_type': dict(writer.types), 'by_origin': dict(writer.origins),
                                 'synthetic_fraction': writer.origins['synthetic'] / writer.count,
@@ -278,7 +318,7 @@ def prepare(source, output, size, config):
                                 'catalog_changes': conflicts, 'quality_flags': dict(writer.quality)},
                         validation=validations, policies=POLICIES,
                         artifacts={'events.jsonl': digest_file(output / 'events.jsonl'),
-                                   'entities.sqlite': digest_file(output / 'entities.sqlite')},
+                                   'entities.sqlite': digest_file(output / 'entities.sqlite'), **extra_artifacts},
                         environment={'python': platform.python_version(), 'platform': platform.platform()},
                         code_sha256=digest_file(__file__))
         (output / 'manifest.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + '\n')

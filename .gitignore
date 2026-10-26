@@ -1,0 +1,11 @@
+10M.csv
+data/prepared/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+data/fraude/
+results/*
+!results/.gitkeep
+!results/verification.json
+!results/*_metrics.json

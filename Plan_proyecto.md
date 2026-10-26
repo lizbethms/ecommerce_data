@@ -13,7 +13,7 @@ La solución combinará el histórico real de REES46 con información derivada y
 - Co-compra, influencia y comunidades de productos.
 - Servicio al usuario y medición del pipeline completo.
 
-Este documento define el diseño previsto; no implica que el generador, el pipeline o los benchmarks ya estén implementados.
+Este documento combina el diseño previsto con el estado verificado de las etapas 0 y 6. La etapa 6 cuenta con API `/fraude`, servicio, persistencia CSV y pruebas 1K/10K, descritos abajo. Las etapas 1–5 y 7–9 y la integración completa permanecen pendientes.
 
 ## Data
 
@@ -139,7 +139,7 @@ Las diez etapas serán parte de una ejecución integrada. Las elecciones siguien
 | 5 | Índice multidimensional / S6 | KD-Tree y KNN exacto | Consultar características numéricas de baja dimensión y producir candidatos exactos de referencia. |
 | 6 [FIJA] | Filtrado probabilístico / S7 | Bloom Filter y Count-Min Sketch | Consultar pertenencia y estimar intensidad por clave y ventana; emitir señales y verificaciones exactas cuando proceda. |
 | 7 [FIJA] | Similitud aproximada / S7 | MinHash + LSH y HNSW | Obtener candidatos por conjuntos y vectores; emitir productos relacionados y métricas frente a métodos exactos. |
-| 8 [FIJA] | Grafo del dominio / S8–S9 | PageRank y Louvain | Actualizar co-compra por orden sintética y producir influencia y comunidades. |
+| 8 [FIJA] | Grafo del dominio / S8–S9 | Personalized PageRank y Louvain | Actualizar co-compra por orden confirmada, con procedencia sintética documentada; producir complementos y comunidades. |
 | 9 | Servicio y visualización / transversal | Top-K y Trie | Combinar candidatos, popularidad y señales del grafo para recomendaciones, búsquedas, autocompletado y paneles. |
 
 ### Integración y estado
@@ -153,12 +153,182 @@ Un evento rechazado por validación o identificado como duplicado conservará un
 ### Representaciones para similitud y grafo
 
 - **Matriz usuario–producto:** interacciones ponderadas por tipo, con pesos configurables. Analizar cómo la mayor cantidad de vistas afecta las señales de compra.
-- **Conjuntos para MinHash:** usuarios que interactuaron con cada producto dentro de una ventana; comparar Jaccard estimado con Jaccard exacto.
+- **Conjuntos para MinHash:** atributos de cada producto con prefijos de campo, por ejemplo `{categoria:running, marca:X, uso:deporte}`; comparar Jaccard estimado con Jaccard exacto. Excluir identificadores únicos y valores desconocidos compartidos que inflarían artificialmente la similitud. Como extensión separada, evaluar conjuntos de usuarios que interactuaron con cada producto dentro de una ventana; no mezclar ambas representaciones en un mismo experimento.
 - **Vectores para HNSW:** características de producto derivadas de atributos y comportamiento. Ajustar transformaciones con el periodo de referencia, sin incorporar información futura de evaluación.
 - **KNN:** usar el mismo espacio y métrica al comparar HNSW con búsqueda exacta. El KD-Tree podrá usar una representación de baja dimensión; si difiere de la de HNSW, reportarlo como experimento separado y usar fuerza bruta en el espacio de HNSW.
 - **Grafo de co-compra:** productos como nodos y aristas no dirigidas ponderadas por el número de órdenes distintas compartidas. Contabilizar cada par una vez por orden, sin bucles ni doble conteo por reenvíos. Definir la finalización de órdenes y la ventana temporal.
 - **Frecuencias:** definir clave, ventana, umbral y política de expiración para CMS; por ejemplo, intentos de pago por usuario en una ventana. Un CMS simple no elimina por sí mismo eventos vencidos: usar ventanas por bloques o rotación documentada.
 - **Pertenencia:** un positivo del Bloom Filter no prueba identidad ni fraude. Verificar con un registro exacto antes de descartar una operación legítima o bloquear una cuenta.
+
+## Diseño implementable de las etapas obligatorias 6–8
+
+Las tres etapas deben resolver funciones del ecommerce y entregar resultados consumidos por el servicio. La etapa 6 requiere **Bloom Filter y Count-Min Sketch**; la etapa 7 requiere **una técnica de conjuntos y una técnica ANN**, por lo que se implementarán MinHash + LSH **y** HNSW. La etapa 8 requiere **ranking y comunidades**, resueltos con Personalized PageRank y Louvain. Ninguna de estas elecciones reemplaza las otras siete etapas del pipeline.
+
+### Relación con los requerimientos del ecommerce
+
+| Requerimiento funcional | Algoritmos y responsabilidad | Salida observable |
+|---|---|---|
+| Posible fraude: reconocer entidades señaladas | Bloom Filter como prefiltro y tabla hash como verificación exacta | Coincidencia verificada o falso positivo registrado. |
+| Posible fraude: intensidad de intentos | CMS por ventana y verificador exacto de candidatos | Alerta con clave, ventana, estimación y conteo verificado. |
+| Productos relacionados: alternativas similares | MinHash + LSH sobre atributos y HNSW sobre vectores | Top-K de productos similares y comparación con referencias exactas. |
+| Co-compra y cross-selling: complementos | Grafo ponderado y Personalized PageRank desde producto/carrito | Top-K de complementos con puntuación y contexto de consulta. |
+| Agrupaciones de consumo | Louvain sobre el mismo grafo | Comunidad por producto, tamaños y métricas del grafo. |
+| Servicio y panel | Consumo de las salidas anteriores en la etapa 9 | Productos similares, complementos, comunidades y alertas verificadas. |
+
+### Etapa 6: pertenencia e intensidad de posibles intentos de fraude
+
+**Bloom Filter.** Mantener un registro exacto de cuentas, dispositivos y medios de pago ficticios señalados. Construir el filtro con claves tipadas como `device:<id>`, `account:<id>` y `payment:<id>` para evitar colisiones semánticas entre entidades. Al recibir un intento de pago:
+
+1. Consultar las claves aplicables en el filtro.
+2. Si la respuesta es negativa, registrar que la clave no pertenece al conjunto insertado y continuar las demás validaciones; esto no acredita que el pago sea seguro.
+3. Si la respuesta es positiva, consultar el registro exacto. Registrar por separado coincidencias verificadas y falsos positivos.
+4. Emitir una señal de entidad señalada únicamente tras confirmación exacta; la política de negocio decidirá revisión, retención o bloqueo.
+
+Configurar capacidad prevista y tasa objetivo de falsos positivos; registrar ocupación y claves insertadas para detectar saturación. El registro exacto será la fuente de verdad. Actualizar filtro y registro de forma consistente; reconstruir el Bloom Filter cuando se retiren entidades señaladas, pues el filtro estándar no admite borrado seguro.
+
+**Count-Min Sketch.** La configuración inicial para la demo será:
+
+| Parámetro | Decisión inicial |
+|---|---|
+| Evento contado | `payment_attempt`, una vez por `payment_attempt_id` válido. |
+| Clave | `device_id`; cuentas y medios de pago serán extensiones configurables. |
+| Reloj | `event_time` en UTC; la velocidad del reproductor no cambia la ventana. |
+| Ventana | Cinco intervalos alineados de un minuto: el actual y los cuatro anteriores. |
+| Expiración | Anillo de cinco CMS; reiniciar un bloque al reutilizarlo y expirar todos los vencidos ante saltos de tiempo. |
+| Estimación | Sumar las estimaciones de la clave en los bloques activos. |
+| Umbral de candidato | Estimación mayor o igual que 20 intentos; valor ilustrativo configurable, no calibrado para fraude real. |
+| Confirmación | Conteo exacto por clave sobre los mismos intervalos antes de una acción restrictiva. |
+
+Esta ventana tiene resolución de un minuto y no equivale exactamente a los últimos 300 segundos en cualquier instante. El comparador exacto deberá usar los mismos límites. El coordinador definirá un avance temporal monotónico y una política explícita para eventos tardíos; la prioridad del heap puede alterar el orden de llegada y no debe hacer retroceder ni reiniciar incorrectamente las ventanas.
+
+Para el alcance académico, mantener un diccionario exacto de conteos por bloque con la misma expiración; servirá como verificador y referencia experimental. Reportar su costo junto al del CMS para no atribuir al sistema completo un ahorro que solo pertenece al sketch. Un CMS sin sobreflujo y con actualizaciones positivas puede sobreestimar por colisiones; no usar su estimación como evidencia suficiente para bloquear.
+
+**Salida:** `risk_signals` con pertenencias consultadas, verificaciones, clave de frecuencia, límites de ventana, estimación, conteo exacto cuando aplique y decisión. Las etiquetas `is_injected_anomaly` quedan fuera del detector. La etapa 9 consumirá las alertas verificadas. Si se emite un nuevo evento de alerta hacia el heap, asignarle identidad y referencia al evento causal y evitar que vuelva a generar la misma alerta indefinidamente.
+
+**Criterios de aceptación:** un positivo falso del Bloom Filter no bloquea una operación; una sobreestimación del CMS no genera una restricción sin confirmar; los reenvíos no incrementan dos veces el conteo; los intentos vencidos dejan de contribuir; la demo muestra estimación y conteo real.
+
+### Implementación entregada de etapa 6: API `/fraude` y servicio
+
+La etapa 6 funciona de forma independiente mediante FastAPI o procesamiento JSONL por lotes. Ambos adaptadores utilizan `FraudService`; las estructuras probabilísticas están separadas de transporte y persistencia. El adaptador por lotes admite eventos preparados y sobres reales de etapa 0, conserva los resultados anteriores y añade `stage_results["6"]` y `processing_times["6"]`. Esta entrega no implementa las etapas intermedias ni la confirmación de cambios de índices o grafo.
+
+#### Contrato HTTP
+
+| Método y endpoint | Contrato |
+|---|---|
+| `POST /fraude/eventos` | Entrada `{"evento": {...}}`; salida `evento_id`, `estado`, `senales_riesgo`. |
+| `PUT /fraude/entidades/{tipo}/{identificador}` | Alta o actualización con `{"motivo":"Caso ficticio"}`. |
+| `DELETE /fraude/entidades/{tipo}/{identificador}` | Retiro idempotente y reconstrucción del Bloom. |
+| `GET /fraude/entidades` | Registro exacto de entidades señaladas. |
+| `GET /fraude/metricas` | Configuración, contadores, ventana, capacidad y ocupación Bloom. |
+| `GET /fraude/salud` | Disponibilidad y recuperación del historial. |
+
+Los tipos de entidad son `cuenta`, `dispositivo` y `medio_pago`; internamente se mantienen claves `account:`, `device:` y `payment:`. Los nombres de campos del evento se conservan según `schema.py`. La API traduce la salida interna `risk_signals` al español. OpenAPI y ejemplos interactivos están en `/docs`.
+
+Estados HTTP: `procesado`, `duplicado`, `no_aplica`, `fuera_de_ventana`. Las señales contienen pertenencias y verificación exacta, dispositivo contado, límites UTC inclusivo/exclusivo, estimación, conteo exacto para candidatos, motivos y decisión `continuar` o `revisar`. No hay bloqueo automático. HTTP 422 representa validación inválida, 409 identidad contradictoria y 503 fallo de persistencia.
+
+#### Reglas implementadas
+
+- Configuración en `configs/stage6.json`: Bloom con capacidad inicial 1.000 y tasa objetivo 1%; CMS epsilon 0,01 y delta 0,001; umbral 20. Hashes SHA-256 reproducibles y contadores sin desbordamiento de ancho fijo.
+- Registro exacto como fuente de verdad. Los positivos Bloom se verifican; cambios del registro reconstruyen el filtro y su capacidad se amplía al excederla.
+- Anillo de cinco minutos alineados UTC y verificadores exactos con igual expiración. El máximo `event_time` aceptado determina el reloj; los eventos tardíos dentro de la ventana cuentan, los anteriores quedan señalados sin incrementar frecuencias. Los eventos nuevos ajenos a pagos también avanzan el reloj.
+- Deduplicación por `event_id` y `payment_attempt_id`, antes de actualizar ventanas. Los reenvíos equivalentes recuperan el resultado original; los cambios de contenido de negocio generan conflicto. Se excluyen metadatos de recepción, generación, calidad y evaluación del cotejo. Un reenvío conserva su decisión histórica aunque el registro cambie.
+- Historial CSV con columnas `version,secuencia,operacion,contenido,sha256`. Contiene configuración inicial, cambios del registro y eventos válidos; confirma escrituras con `flush`/`fsync` antes de responder. La recuperación reproduce operaciones y rechaza corrupción o configuración incompatible indicando fila.
+- Una instancia y un worker por historial, con bloqueo exclusivo de archivo y serialización de mutaciones. Una escritura fallida impide nuevas mutaciones hasta reiniciar e inspeccionar el historial. Las identidades se retienen para asegurar idempotencia; no hay compactación en esta versión.
+
+#### Preparación, ejemplos y comandos
+
+`prepare.py` incorpora el perfil opcional `stage6`; el predeterminado `stage0` conserva sus 13 escenarios. `schema.py` valida identificadores textuales y estados de pago. Cada dataset de etapa 6 reserva 39 registros sintéticos: los 13 originales y 24 pagos únicos del mismo dispositivo, un reenvío de pago y un pago después de expirar la ventana. Los manifiestos identifican perfil, composición y hashes, incluido `entidades.csv` con el registro inicial ficticio. SQLite sigue siendo un artefacto de preparación, no la persistencia del servicio.
+
+Se generaron `data/prepared/fraude_1K` y `data/prepared/fraude_10K`, con exactamente 1.000 y 10.000 registros: 961/9.961 filas reales y 39 sintéticas. Los conjuntos previos de etapa 0 no se sobrescribieron.
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+FRAUDE_HISTORIAL=data/fraude/demo_01.csv .venv/bin/uvicorn src.api.fraud:create_app --factory --workers 1 --host 127.0.0.1
+# En otra terminal, con historial nuevo:
+.venv/bin/python examples/fraude/probar_api.py
+```
+
+`examples/fraude/` incluye un CSV de entidades, pagos JSON normal/señalado/inválido/conflictivo, 28 eventos JSONL y sus resultados esperados. Son independientes del archivo original. Su README documenta curl, carga de entidades, lotes y reinicio.
+
+```sh
+# Generación; utilizar carpetas nuevas al repetir:
+.venv/bin/python scripts/stage0.py prepare --profile stage6 --size 1000 --output data/prepared/fraude_1K
+.venv/bin/python scripts/stage0.py prepare --profile stage6 --size 10000 --output data/prepared/fraude_10K
+.venv/bin/python scripts/stage6.py --events examples/fraude/eventos.jsonl --entities examples/fraude/entidades.csv --history data/fraude/lote_01.csv --output results/lote_01.jsonl --metrics results/lote_01_metrics.json
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python scripts/verify_stage6.py
+.venv/bin/python scripts/benchmark_stage6.py --output results/stage6_benchmark_metrics.json
+```
+
+#### Evidencia y límites de esta entrega
+
+Pasaron 18 pruebas automatizadas, los 28 ejemplos contra HTTP real y las verificaciones completas de 1K/10K. Cada dataset produjo 30 pagos únicos contabilizados, dos reenvíos sin doble conteo y diez revisiones: cinco por entidad señalada y cinco por frecuencia. El pago final estimó 1 tras expirar los anteriores. Se comprobaron recuperación, hashes y reenvío después del reinicio.
+
+Las corridas completas tardaron aproximadamente 0,114 s (1K) y 1,364 s (10K), incluyendo CSV y salida; no representan tiempos exclusivos de algoritmos. Los resultados están en `results/stage6_verification_metrics.json` y archivos por escala.
+
+El benchmark de estructuras ejecutó 100 repeticiones en memoria por escala, separando construcción, actualización, consulta y medición de memoria. La tasa observada de falsos positivos Bloom fue 1,00%/0,82%, sin falsos negativos. El error medio CMS fue 0/3,753 y el máximo 0/27, sin subestimaciones. Las colisiones y sus verificaciones también se probaron mediante casos forzados.
+
+El benchmark usa 1K/10K claves Bloom y 1K/10K actualizaciones de un CMS individual; no equivale a los 31 registros de pago de los datasets completos. El diccionario exacto ocupó menos memoria incremental que el CMS en estas entradas. El servicio añade cinco verificadores, deduplicación y persistencia; no se atribuye un ahorro global al sketch. Se documentan protocolo, complejidades y límites en [docs/etapa6.md](docs/etapa6.md), y métricas completas en `results/stage6_benchmark_metrics.json`. No se verificaron escalas mayores ni detección de fraude real.
+
+### Etapa 7: productos similares por conjuntos y vectores
+
+**MinHash + LSH.** Construir conjuntos de atributos desde el catálogo, generar firmas MinHash e indexarlas por bandas LSH. Ante una consulta por producto, recuperar candidatos y calcular Jaccard exacto sobre esos candidatos para ordenarlos. La referencia de evaluación calculará Jaccard por fuerza bruta sobre todo el catálogo elegible, no solo sobre lo recuperado por LSH. Excluir el producto consultado y definir una salida vacía o alternativa explícita cuando no existan atributos utilizables.
+
+Guardar número de permutaciones, bandas, filas por banda, semilla y regla de selección de candidatos. Medir calidad tanto de la estimación de Jaccard como de la recuperación, pues reordenar exactamente los candidatos no recupera los productos omitidos por LSH.
+
+**HNSW.** Construir vectores con precio transformado/normalizado, categorías y atributos codificados; las características de comportamiento se añadirán con una ventana histórica explícita. Persistir esquema, transformaciones, métrica y versión de los vectores. Los IDs de producto serán claves de recuperación, nunca coordenadas numéricas de similitud.
+
+La búsqueda exacta de referencia recorrerá los mismos vectores con la misma métrica. Si el KD-Tree de la etapa 5 usa otras dimensiones, se evaluará aparte. Configurar y registrar `M`, `ef_construction` y `ef_search`; medir construcción, actualización, consulta, memoria y `recall@K`.
+
+**Salida:** `similarity_candidates` con listas separadas para LSH y HNSW, `product_id`, puntuación/distancia, método y versión del índice. La etapa 9 combinará candidatos con una regla explícita, eliminará repetidos y productos sin disponibilidad, y producirá el Top-K. No sumar directamente Jaccard y distancias de escalas distintas; usar, por ejemplo, fusión por posiciones de ranking con parámetros documentados.
+
+**Criterios de aceptación:** ambas técnicas se ejecutan en la demo; cada una se compara con su referencia exacta; no se recomienda el producto de entrada; los filtros de elegibilidad son iguales para el método aproximado y su referencia; se registra cómo cada lista contribuye al resultado final.
+
+### Etapa 8: complementos y comunidades en el grafo de co-compra
+
+**Construcción.** Mantener nodos de productos y aristas no dirigidas cuyo peso sea el número de órdenes confirmadas distintas que contienen ambos productos. Una orden con `m` productos distintos genera `m(m-1)/2` pares; varias unidades de un mismo producto no multiplican el peso. Agrupar por `order_id`, cerrar la orden con una señal explícita y registrar los IDs de órdenes ya aplicadas. Para compras históricas sin orden real, usar únicamente las agrupaciones sintéticas documentadas en la preparación.
+
+Ejemplo verificable:
+
+```text
+Orden 101 confirmada: {laptop, mouse, funda}
+Orden 102 confirmada: {laptop, mouse}
+Resultado: peso(laptop, mouse)=2;
+           peso(laptop, funda)=1; peso(mouse, funda)=1.
+Reenviar la orden 101 conserva los mismos pesos.
+```
+
+No actualizar este grafo con vistas, carritos, pagos pendientes ni compras retenidas. La versión inicial representará co-compra histórica bruta: una devolución posterior se reportará por separado y no restará aristas; documentar esta semántica. Empezar con acumulación desde el inicio del replay; una ventana móvil del grafo será una extensión y requerirá retirar las contribuciones de órdenes vencidas.
+
+**Personalized PageRank.** Personalizar desde el producto consultado o distribuir la masa inicial entre productos del carrito. Usar pesos de co-compra en las transiciones y excluir del resultado los productos semilla y los no disponibles. Parametrizar amortiguación, tolerancia y máximo de iteraciones. Para el panel de influencia global, ejecutar la misma familia con personalización uniforme. Comparar el ranking con grado ponderado, reportando el contexto global o personalizado de cada comparación.
+
+**Louvain.** Ejecutar sobre una instantánea del mismo grafo ponderado para identificar comunidades de consumo. Comparar con Label Propagation, usando las mismas reglas de pesos y calculando modularidad bajo una convención común. Guardar semilla, resolución, tiempo, tamaños y estabilidad entre ejecuciones. Las comunidades describen asociaciones de compra, no categorías garantizadas ni relaciones causales.
+
+Para no recalcular todo el grafo por evento, actualizar aristas al confirmar órdenes y programar ranking/comunidades por lotes o intervalos configurables. Cada salida indicará `graph_version` y fecha de corte; la demo esperará explícitamente el análisis de la versión que desea mostrar.
+
+**Salida:** `graph_recommendations`, `global_influence` y `community_id` por producto, con versión del grafo. La etapa 9 mostrará complementos, influencia y agrupaciones, diferenciándolos de los productos similares de la etapa 7.
+
+**Criterios de aceptación:** el ejemplo de dos órdenes produce los pesos esperados; los reenvíos no cambian el grafo; una compra pendiente no crea aristas; se muestran complementos desde una semilla, ranking global y comunidades; los métodos de comparación usan la misma instantánea.
+
+### Contrato de integración y caso de demostración
+
+El sobre del evento incorporará `risk_signals`, `similarity_candidates`, `graph_recommendations`, versiones de índices/grafo y tiempos por etapa. Las listas voluminosas podrán persistirse por referencia. Los nombres son contratos de diseño que deben concretarse en los módulos Python.
+
+```text
+Compra confirmada con order_id y payment_attempt_id referenciados
+  → 0–1: recepción, validación, normalización y deduplicación
+  → 2: prioridad de entrega/pago y desempate estable
+  → 3–5: consulta de catálogo, índices y candidatos exactos
+  → 6: consultar señales de riesgo y decidir confirmación de cambios
+  → 7: recuperar alternativas similares con LSH y HNSW
+  → 8: aplicar orden cerrada una sola vez y consultar complementos/comunidades
+  → 9: mostrar Top-K, ventas y señales de alerta con trazabilidad
+```
+
+El intento de pago se cuenta al procesar su propio evento, no otra vez al procesar la compra que lo referencia. Las entidades señaladas se consultan cuando correspondan. Una búsqueda o vista puede consultar las recomendaciones existentes sin modificar el grafo. Una operación retenida conserva salida de alerta y no confirma compras ni inventario. El servicio podrá leer índices confirmados después de la decisión de la etapa 6.
+
+Preparar dos escenarios complementarios: una compra válida que llegue a las diez etapas y cambie el grafo, y una ráfaga de intentos con verificaciones de riesgo que produzca una alerta. Persistir por `event_id` las entradas, decisiones y salidas utilizadas por etapas posteriores para demostrar integración, no solo ejecuciones aisladas.
 
 ## Arquitectura del repositorio y notebooks
 
@@ -219,7 +389,7 @@ El enunciado no especifica si la escala del grafo corresponde a nodos o aristas.
 | Count-Min Sketch | Diccionario exacto: tiempo, memoria y error de frecuencia; medir también calidad de alertas simuladas. |
 | MinHash + LSH | Jaccard exacto por fuerza bruta: tiempo, memoria y calidad de recuperación. |
 | HNSW | KNN exacto/fuerza bruta en el mismo espacio: tiempo, recall@K y memoria. |
-| PageRank | Ranking por grado ponderado o frecuencia: tiempo y diferencias en el ranking. |
+| Personalized PageRank | Ranking por grado ponderado: tiempo y diferencias en el ranking; distinguir consulta personalizada y ranking global con personalización uniforme. |
 | Louvain | Label Propagation sobre el mismo grafo: modularidad, tiempo, número/tamaños de comunidades y estabilidad. |
 
 ### Protocolo reproducible
@@ -230,7 +400,7 @@ El enunciado no especifica si la escala del grafo corresponde a nodos o aristas.
 - Definir cuándo se reinicia el estado entre repeticiones; distinguir caché fría y caliente y excluir calentamientos de las estadísticas medidas.
 - Medir memoria actual y pico con `tracemalloc` y, cuando existan extensiones nativas, una medición de memoria del proceso que cubra sus asignaciones.
 - Graficar escalabilidad log-log y contrastar resultados con las complejidades esperadas.
-- Usar separación temporal entre construcción de representaciones y evaluación para evitar información futura. Calcular la referencia exacta sobre el mismo conjunto de candidatos que el método aproximado.
+- Usar separación temporal entre construcción de representaciones y evaluación para evitar información futura. Calcular la referencia exacta sobre todo el universo elegible indexado por el método aproximado, con las mismas consultas y filtros; no limitarla a los candidatos que este recuperó.
 - Registrar limitaciones de escala con evidencia. Si una corrida no cabe en memoria o no termina en el presupuesto disponible, reportarlo; no sustituirla silenciosamente por un tamaño menor.
 
 ## Demostración y verificaciones
@@ -254,6 +424,25 @@ Las verificaciones automatizadas cubrirán invariantes relevantes: referencias d
 4. Incorporar representaciones, estructuras y comparaciones exactas; verificar consistencia y trazabilidad.
 5. Ejecutar experimentos, guardar métricas y elaborar gráficos e interpretación.
 6. Preparar notebooks, README, diagrama, informe PDF de 8–12 páginas y presentación de 10–15 diapositivas.
+
+### Tareas de implementación de las etapas 6–8
+
+- [ ] Definir configuración versionada para claves, ventanas, umbrales, Bloom, CMS, LSH, HNSW y grafo.
+- [x] Implementar registro exacto de entidades señaladas y generador reproducible de intentos de pago.
+- [x] Implementar Bloom Filter, actualización/reconstrucción y verificación exacta de positivos.
+- [x] Implementar CMS por bloques, avance temporal, expiración y contador exacto de referencia/verificación.
+- [x] Exponer API `/fraude`, servicio compartido y adaptador por lotes con persistencia CSV recuperable.
+- [x] Incluir datos de ejemplo, pruebas y verificación 1K/10K de etapa 6, con 100 repeticiones de comparaciones de estructuras en memoria.
+- [ ] Integrar `risk_signals` con confirmación de cambios y panel de alertas.
+- [ ] Construir conjuntos de atributos y referencia Jaccard; implementar MinHash + LSH.
+- [ ] Construir vectores versionados y referencia KNN exacta; implementar HNSW.
+- [ ] Integrar ambas listas de candidatos con filtros y regla de fusión del servicio.
+- [ ] Implementar cierre de órdenes, deduplicación por orden y actualización idempotente de aristas.
+- [ ] Implementar Personalized PageRank y ranking global con comparación por grado ponderado.
+- [ ] Implementar Louvain y comparación con Label Propagation sobre instantáneas comunes.
+- [ ] Incorporar versiones del grafo y consumo de complementos/comunidades en la etapa 9.
+- [ ] Verificar los criterios de aceptación con casos controlados e integración de diez etapas.
+- [ ] Ejecutar benchmarks por escala y guardar configuración, métricas, memoria y calidad.
 
 El repositorio incluirá la tabla de responsables por etapa y contribuciones, coherente con el historial de Git. Cada integrante asumirá al menos dos etapas o una familia del bloque avanzado y deberá poder explicar el funcionamiento del pipeline completo.
 

@@ -1,0 +1,4 @@
+tipo,identificador,motivo
+cuenta,syn:example:flagged-user,Cuenta ficticia señalada
+dispositivo,syn:example:flagged,Dispositivo ficticio señalado
+medio_pago,syn:example:flagged-method,Medio ficticio señalado
