@@ -85,6 +85,38 @@ class TestStructures(unittest.TestCase):
             brute = sorted(points, key=lambda p: squared_distance(q, p[1]))[:5]
             self.assertEqual([k for k, _ in tree.knn(q, 5)], [k for k, _ in brute])
 
+    def test_kd_tree_validates_vectors_and_freezes_points(self):
+        with self.assertRaisesRegex(ValueError, 'Dimensiones incompatibles'):
+            squared_distance([0, 1], [0])
+        with self.assertRaisesRegex(ValueError, 'Dimensión inválida'):
+            KDTree([('a', [0, 1]), ('b', [2])])
+        with self.assertRaisesRegex(ValueError, 'finitos'):
+            KDTree([('a', [0, float('nan')])])
+        with self.assertRaisesRegex(ValueError, 'ID duplicado'):
+            KDTree([('a', [0]), ('a', [1])])
+        vector = [0.0, 0.0]
+        tree = KDTree([('a', vector), ('b', [2.0, 2.0])])
+        vector[:] = [100.0, 100.0]
+        self.assertEqual(tree.knn([0.0, 0.0], 1)[0][0], 'a')
+        with self.assertRaisesRegex(ValueError, 'Dimensión inválida'):
+            tree.knn([0.0], 1)
+
+    def test_kd_tree_ties_are_deterministic(self):
+        points = [('z', [1.0, 0.0]), ('a', [-1.0, 0.0]), ('m', [0.0, 1.0])]
+        expected = ['a', 'm']
+        self.assertEqual([key for key, _ in KDTree(points).knn([0.0, 0.0], 2)], expected)
+        self.assertEqual([key for key, _ in KDTree(reversed(points)).knn([0.0, 0.0], 2)], expected)
+
+    def test_kd_tree_query_metrics(self):
+        points = [(i, [float(i), float(i % 3)]) for i in range(100)]
+        neighbors, stats = KDTree(points).knn([20.1, 2.0], 4, with_stats=True)
+        self.assertEqual(len(neighbors), 4)
+        self.assertEqual(stats['total_nodes'], len(points))
+        self.assertLessEqual(stats['nodes_visited'], stats['total_nodes'])
+        self.assertLessEqual(stats['distance_evaluations'], stats['nodes_visited'])
+        self.assertGreater(stats['branches_pruned'], 0)
+        self.assertAlmostEqual(stats['visited_fraction'], stats['nodes_visited'] / len(points))
+
     def test_hnsw_recall(self):
         points = [(i, [RNG.random() for _ in range(8)]) for i in range(600)]
         index = HNSW(M=8, ef_construction=64, ef_search=64, seed=1)
@@ -105,6 +137,35 @@ class TestStructures(unittest.TestCase):
         self.assertTrue(all(key in bloom for key in keys))
         false_positives = sum(f'absent{i}' in bloom for i in range(5000)) / 5000
         self.assertLess(false_positives, 0.05)
+
+    def test_bloom_validation_bulk_clear_and_stats(self):
+        for capacity, rate in ((0, 0.01), (True, 0.01), (10, 0), (10, 1), (10, float('nan'))):
+            with self.assertRaises(ValueError):
+                BloomFilter(capacity, rate)
+        bloom = BloomFilter(100, 0.01)
+        self.assertEqual(bloom.update(['a', 'b', 'c']), 3)
+        self.assertEqual(len(bloom), 3)
+        self.assertTrue(all(key in bloom for key in ('a', 'b', 'c')))
+        stats = bloom.stats()
+        self.assertEqual(stats['inserted'], 3)
+        self.assertGreater(stats['set_bits'], 0)
+        self.assertGreater(stats['fill_ratio'], 0)
+        self.assertLess(stats['fill_ratio'], 1)
+        self.assertFalse(stats['capacity_exceeded'])
+        self.assertFalse(stats['insertion_calls_exceeded'])
+        self.assertAlmostEqual(stats['observed_fp_estimate'], bloom.observed_fp_estimate())
+        bloom.clear()
+        self.assertEqual(len(bloom), 0)
+        self.assertEqual(bloom.set_bits(), 0)
+        self.assertFalse(any(key in bloom for key in ('a', 'b', 'c')))
+
+    def test_bloom_hash_positions_are_distinct_and_type_aware(self):
+        bloom = BloomFilter(100, 0.01)
+        positions = list(bloom._positions('clave'))
+        self.assertEqual(len(positions), bloom.k)
+        self.assertEqual(len(set(positions)), bloom.k)
+        self.assertNotEqual(list(bloom._positions(1)), list(bloom._positions('1')))
+        self.assertNotEqual(list(bloom._positions(b'1')), list(bloom._positions('1')))
 
     def test_count_min_never_underestimates(self):
         sketch, exact = CountMinSketch(64, 4), {}
