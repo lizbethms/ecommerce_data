@@ -26,7 +26,7 @@ def markdown_table(frame):
     ])
 
 
-def export_report(evidence, output):
+def export_report(evidence, output, memory_evidence=None):
     output = Path(output)
     tables_dir, figures_dir = output / 'tablas', output / 'figuras'
     tables_dir.mkdir(parents=True, exist_ok=True)
@@ -307,10 +307,13 @@ def export_report(evidence, output):
     ]
     for name, caption in captions:
         notes.extend([f'### {name}', f'![{name}](figuras/{name}.png)', caption])
+    if memory_evidence is not None:
+        from src.analysis.informe_memoria import memory_section
+        notes.append(memory_section(memory_evidence, output))
     notes.extend([
         '## Alcance y pendientes',
         'Esta corrida es una demo funcional y un piloto, no sustituye la campaña de 100 repeticiones independientes, '
-        'las cinco escalas ni la medición de memoria actual/pico. No se han medido aquí tiempos de construcción aislados. '
+        'las cinco escalas ni la evaluación completa de memoria por estructura. No se han medido aquí tiempos de construcción aislados. '
         'PageRank y Louvain se cronometran una vez sobre la misma instantánea completa sin aislados; '
         'no se estima dispersión con n=1. Label Propagation y estabilidad de comunidades siguen pendientes.',
         'El tamaño principal de integración se expresa en eventos. V y E son resultados de las compras aceptadas; '
