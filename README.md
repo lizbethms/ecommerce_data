@@ -74,6 +74,28 @@ PYTHONHASHSEED=2026 python scripts/demo_tecnica.py \
 
 Abre `results/flujo_1K/informe/resumen.md`. La misma carpeta contiene `evidencia.json`, tablas y figuras. El análisis usa una aplicación aislada y no requiere levantar la API. También puedes explorar los resultados en el [notebook](notebooks/01_demo_tecnica.ipynb).
 
+### Medir memoria por escala
+
+Con las carpetas preparadas, ejecuta una campaña independiente para Bloom, CMS, CMS por ventanas, HNSW, KD-Tree y MinHash/LSH, junto a sus alternativas exactas:
+
+```sh
+python scripts/benchmark_memoria.py \
+  --datos data/prepared/perfil_1K data/prepared/perfil_10K data/prepared/perfil_100K \
+  --salida results/experimentos/memoria_completa_01 --repeticiones 3
+```
+
+Agrega `data/prepared/perfil_1M` y `data/prepared/perfil_10M` a `--datos` cuando existan. El script crea un proceso nuevo por estructura, escala y repetición; guarda `evidencia_memoria.json`, `resumen_memoria.csv`, `resumen_memoria.md` y figuras. La carpeta de salida debe ser nueva. Las claves de fraude proceden de los intentos de pago, incluidos reenvíos. Los vectores de 19 dimensiones se derivan del catálogo sin popularidad dinámica; los conjuntos se forman con vistas, carritos y compras. Cada comparación usa el mismo input dentro de su familia. El informe registra eventos y tamaño real de cada índice. La memoria Python incremental excluye los datos de entrada; el pico RSS cubre el proceso completo.
+
+Para incorporar esa comparación al informe de 1K ya generado, sin repetir sus consultas:
+
+```sh
+python scripts/demo_tecnica.py \
+  --evidencia results/flujo_1K/informe/evidencia.json \
+  --memoria results/experimentos/memoria_completa_01/evidencia_memoria.json
+```
+
+También puedes pasar `--memoria` al generar un informe nuevo. Esto añade la sección y las figuras de memoria; las repeticiones de memoria se ejecutan únicamente con `benchmark_memoria.py`.
+
 El informe incluye un resumen del monitor al terminar esa reproducción: ingesta, eventos aceptados por tipo y origen, alertas de pago, ventas y cola. Las alertas son órdenes señaladas para revisión o bloqueo, no fraudes confirmados. La sección de fraude distingue alertas por orden de decisiones por intento de pago.
 
 ## 5. Iniciar la API, el dashboard y el tráfico
