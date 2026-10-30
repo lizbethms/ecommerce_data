@@ -1,0 +1,30 @@
+{
+  "seed": 2026,
+  "format": "parquet",
+  "chunk_size": 10000,
+  "order_window_minutes": 30,
+  "synthetic": {
+    "fraction": 0.20,
+    "scenario_weights": {
+      "shopping": 0.60,
+      "browsing": 0.35,
+      "fraud_burst": 0.05
+    },
+    "basket_size": [2, 4],
+    "p_return": 0.08,
+    "p_review": 0.30,
+    "resend_fraction": 0.005,
+    "include_controlled": true,
+    "n_flagged": 5,
+    "users_per_event": 0.05,
+    "catalog_limit": 10000,
+    "catalog_source_rows": 10000
+  },
+  "profiles": {
+    "1K": {"size": 1000},
+    "10K": {"size": 10000},
+    "100K": {"size": 100000},
+    "1M": {"size": 1000000},
+    "10M": {"size": 10000000, "chunk_size": 50000}
+  }
+}
