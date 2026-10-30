@@ -86,13 +86,19 @@ def renderizar(snapshot):
     ingesta = panel.get("ingesta") or {}
     alertas = panel["alertas"]
     cola = panel["cola_ordenes"]
+    carga = snapshot["salud"].get("carga") or {}
+    st.caption(
+        f"Datos: {carga.get('directorio', 'sin carpeta configurada')} · "
+        f"Eventos precargados: {carga.get('eventos_precargados', 0):,} · "
+        "Estado acumulado de esta API en memoria"
+    )
 
     kpis = st.columns(6)
     kpis[0].metric("Aceptados", f"{ingesta.get('aceptados', 0):,}")
     kpis[1].metric("Duplicados", f"{ingesta.get('duplicados', 0):,}")
     kpis[2].metric("Rechazados", f"{ingesta.get('rechazados', 0):,}")
     kpis[3].metric("Ventas netas", f"{ventas.get('monto_neto', '0.00')}")
-    kpis[4].metric("Alertas", f"{alertas.get('total', 0):,}")
+    kpis[4].metric("Alertas de pago", f"{alertas.get('total', 0):,}")
     kpis[5].metric("En cola", f"{cola.get('en_cola', 0):,}")
 
     tab_resumen, tab_eventos, tab_fraude, tab_cocompra, tab_sistema = st.tabs(
@@ -155,6 +161,11 @@ def renderizar(snapshot):
             st.caption("No se han registrado rechazos.")
 
     with tab_fraude:
+        st.caption("Alertas por orden señalada; no equivalen a fraudes confirmados ni a intentos de pago.")
+        col_total, col_bloqueos, col_revision = st.columns(3)
+        col_total.metric("Alertas", f"{alertas.get('total', 0):,}")
+        col_bloqueos.metric("Bloqueadas", f"{alertas.get('bloqueos', 0):,}")
+        col_revision.metric("En revisión", f"{alertas.get('total', 0) - alertas.get('bloqueos', 0):,}")
         izquierda, derecha = st.columns((3, 2))
         with izquierda:
             st.subheader("Alertas recientes")
@@ -198,7 +209,7 @@ if "monitor_activo" not in st.session_state:
 st.sidebar.header("Monitor")
 api_url = st.sidebar.text_input("URL de FastAPI", API_PREDETERMINADA)
 intervalo = st.sidebar.slider("Actualizar cada (segundos)", 1, 10, 2)
-minutos = st.sidebar.slider("Ventana de actividad (minutos)", 5, 180, 30)
+minutos = st.sidebar.slider("Últimos minutos con actividad", 5, 180, 30)
 limite = st.sidebar.slider("Elementos por lista", 5, 50, 10)
 
 col_iniciar, col_pausar = st.sidebar.columns(2)

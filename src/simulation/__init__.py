@@ -1,1 +1,0 @@
-"""Reproducción de eventos."""

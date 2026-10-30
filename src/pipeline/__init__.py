@@ -1,1 +1,1 @@
-"""Coordinación de etapas."""
+"""Coordinación del pipeline de ingesta."""

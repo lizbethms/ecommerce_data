@@ -17,8 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.data.prepare import digest_file, prepare
+from src.data.configuration import parse_size, resolve_profile
 from src.data.sample import sample_sessions, write_manifest
-from src.pipeline.stage0 import run_stage0
+from src.pipeline.runner import run_pipeline
 
 
 def max_rss_bytes():
@@ -45,17 +46,18 @@ def max_rss_bytes():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=ROOT / 'configs/stage0.json')
+    parser.add_argument('--config', type=Path, default=ROOT / 'configs/replay.json')
     sub = parser.add_subparsers(dest='command', required=True)
     build = sub.add_parser('prepare')
-    build.add_argument('--source', type=Path, default=ROOT / 'data/10M.csv')
+    build.add_argument('--source', type=Path, default=ROOT / '10M.csv')
     selection = build.add_mutually_exclusive_group(required=True)
-    selection.add_argument('--size', type=int)
+    selection.add_argument('--size', type=parse_size, help='Total exacto: entero, 1K, 10K, 100K, 1M o 10M')
+    selection.add_argument('--profile', help='Perfil del archivo de configuración')
     selection.add_argument('--all-source', action='store_true', help='Conservar todas las filas y añadir escenarios')
     build.add_argument('--output', type=Path, required=True)
-    build.add_argument('--format', choices=['jsonl', 'parquet'], default='jsonl')
+    build.add_argument('--format', choices=['jsonl', 'parquet'], help='Sobrescribe format del perfil')
     sample = sub.add_parser('sample', help='Copia pequeña por sesiones + preparación Parquet')
-    sample.add_argument('--source', type=Path, default=ROOT / 'data/10M.csv')
+    sample.add_argument('--source', type=Path, default=ROOT / '10M.csv')
     sample.add_argument('--rows', type=int, help='Filas objetivo de la copia (por defecto, config sample.target_rows)')
     sample.add_argument('--csv-output', type=Path, help='Copia CSV (por defecto data/sample_<N>.csv)')
     sample.add_argument('--output', type=Path, required=True)
@@ -69,7 +71,15 @@ def main():
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
     if args.command == 'prepare':
-        result = prepare(args.source, args.output, args.size, config, args.format)
+        try:
+            config = resolve_profile(config, args.profile)
+            size = config['size'] if args.profile else args.size
+            config.pop('size', None)
+            output_format = args.format or config.get('format', 'jsonl')
+            config['format'] = output_format
+            result = prepare(args.source, args.output, size, config, output_format)
+        except ValueError as error:
+            parser.error(str(error))
         print(json.dumps({'output': str(args.output), 'counts': result['counts'], 'validation': result['validation']}, indent=2))
     elif args.command == 'sample':
         sampling, synthetic = config.pop('sample'), config.pop('synthetic', None)
@@ -90,7 +100,7 @@ def main():
         if args.metrics.resolve() in {args.events.resolve(), args.output.resolve()} or args.metrics.exists():
             parser.error('Las métricas requieren un archivo nuevo separado de entrada y salida')
         tracemalloc.start()
-        result = asyncio.run(run_stage0(args.events, args.output, config, args.mode, args.consumer_delay))
+        result = asyncio.run(run_pipeline(args.events, args.output, config, args.mode, args.consumer_delay))
         current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
         result.update(python_memory_current_bytes=current, python_memory_peak_bytes=peak,
