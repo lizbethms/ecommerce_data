@@ -8,12 +8,18 @@ Una API FastAPI recibe tráfico con la estructura de `data/prepared_5K/events.pa
 pip install -r requirements.txt
 python scripts/stage0.py --config configs/sample.json sample --output data/prepared_5K   # si aún no existe
 uvicorn API_SERVICIOS.main:app --reload            # documentación interactiva en http://127.0.0.1:8000/docs
+streamlit run dashboard/app.py                       # monitor en http://localhost:8501
 python -m API_SERVICIOS.cliente_trafico --lote 250 --reenvios 0.02 --invalidos 0.01
 ```
 
 - Al arrancar, la API carga catálogo, inventario y señalados desde los Parquet. El resto del estado se construye con el tráfico que llega.
 - `PRECARGAR=1` reproduce además `events.parquet` al iniciar.
 - `ECOMMERCE_DATOS=<carpeta>` indica otra preparación.
+
+El dashboard Streamlit consulta los endpoints existentes sin modificar el estado
+del sistema. Incluye actualización automática, actividad, ventas, ingesta, cola,
+fraude, co-compra y estadísticas. Consulta [`dashboard/README.md`](../dashboard/README.md)
+para ejecutarlo junto con la API y el cliente de tráfico.
 
 ## Flujo de un evento
 
