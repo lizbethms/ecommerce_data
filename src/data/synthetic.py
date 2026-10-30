@@ -3,12 +3,14 @@
 Genera sesiones completas (búsqueda → vistas → carrito → pago → compra →
 devolución/reseña), órdenes de varios productos por "tema" de categoría,
 cuentas/medios/dispositivos señalados, ráfagas de intentos de pago y reenvíos.
-Todo usa el espacio ``syn:`` y una semilla fija. Los eventos se devuelven en
+Todo usa el espacio ``syn:`` y una semilla fija. Se escribe una sesión por vez en
 orden causal para que ``Writer.add`` mantenga pagos, inventario y devoluciones.
 """
+import json
 import random
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
+from itertools import accumulate
 
 from .schema import stable_id, utc
 
@@ -31,10 +33,12 @@ class Generator:
         self.db, self.run, self.cfg, self.envelope = db, run, cfg, envelope
         self.rng = random.Random(seed)
         self.start, self.end = _parse(start), _parse(end)
-        self.events = []
+        self.events = []  # Solo la sesión actual; se vacía después de escribirla.
         self.counter = 0
         rows = db.execute('SELECT product_id, category_id, category_code, brand, last_observed_price '
-                          'FROM catalog ORDER BY product_id').fetchall()
+                          'FROM catalog ORDER BY product_id LIMIT ?', (cfg['catalog_limit'],)).fetchall()
+        if not rows:
+            raise ValueError('La generación sintética requiere un catálogo no vacío')
         themes = defaultdict(list)
         for row in rows:
             if row[2]:
@@ -44,6 +48,14 @@ class Generator:
             self.rng.shuffle(products)  # el orden fija qué productos serán "populares"
         self.theme_names = sorted(self.themes)
         self.theme_weights = [len(self.themes[t]) for t in self.theme_names]
+        self.product_weights = {name: list(accumulate(1 / (rank + 1) for rank in range(len(products))))
+                                for name, products in self.themes.items()}
+        self.summary = dict(events=0, by_type={}, flags=0, themes=len(self.themes),
+                            catalog_products_loaded=len(rows), injected_anomalies=0,
+                            injected_duplicates=0, scenarios={}, tail_events=0,
+                            max_session_events=0, resend_selection='sqlite_with_replacement')
+        self.types, self.scenarios = Counter(), Counter()
+        self.candidates = 0
 
     def _id(self, *parts):
         return stable_id(self.run, SCENARIO_ID, *parts)[:16]
@@ -60,10 +72,9 @@ class Generator:
 
     def _pick(self, theme, n):
         products = self.themes[theme]
-        weights = [1 / (rank + 1) for rank in range(len(products))]  # Zipf: pocos productos influyentes
         chosen = []
         while len(chosen) < min(n, len(products)):
-            product = self.rng.choices(products, weights)[0]
+            product = self.rng.choices(products, cum_weights=self.product_weights[theme])[0]
             if product not in chosen:
                 chosen.append(product)
         return chosen
@@ -79,20 +90,19 @@ class Generator:
 
     def flags(self):
         n = self.cfg['n_flagged']
-        flagged = []
         for k in range(n):
-            flagged.append(('payment_method', f'syn:method:flagged:{k}', 'chargeback_history'))
-            flagged.append(('device', f'syn:device:flagged:{k}', 'emulator_fingerprint'))
-            flagged.append(('account', f'syn:user:fraud:{k}', 'reported_account'))
-        self.db.executemany('INSERT INTO flags VALUES (?, ?, ?)', flagged)
-        return flagged
+            self.db.executemany('INSERT INTO flags VALUES (?, ?, ?)', (
+                ('payment_method', f'syn:method:flagged:{k}', 'chargeback_history'),
+                ('device', f'syn:device:flagged:{k}', 'emulator_fingerprint'),
+                ('account', f'syn:user:fraud:{k}', 'reported_account')))
+        return 3 * n
 
     def shopping(self, index, user):
         session = f'syn:session:{self._id("session", index)}'
         method = f'syn:method:{self._id("method", user)}'
         device = f'syn:device:{self._id("device", user)}'
         theme = self.rng.choices(self.theme_names, self.theme_weights)[0]
-        basket = self._pick(theme, self.rng.randint(2, 4))
+        basket = self._pick(theme, self.rng.randint(*self.cfg['basket_size']))
         when = self._moment()
         self._event('search', when, user, session, query=self._query(basket[0]))
         for product in basket + self._pick(theme, 2):
@@ -168,32 +178,118 @@ class Generator:
                         payment_method_id=method, device_id=device, payment_status='failed',
                         priority=100, priority_reason='failed_payment', is_injected_anomaly=True)
 
-    def build(self):
-        flagged = self.flags()
-        n_users = max(1, self.cfg['n_orders'] // 2)
-        users = [f'syn:user:{self._id("user", u)}' for u in range(n_users)]
-        for index in range(self.cfg['n_orders']):
-            self.shopping(index, self.rng.choice(users))
-        for index in range(self.cfg['n_browse_sessions']):
-            self.browsing(index, self.rng.choice(users))
-        for index in range(self.cfg['n_fraud_bursts']):
-            self.fraud_burst(index)
+    def _flush(self, write):
+        self.summary['max_session_events'] = max(self.summary['max_session_events'], len(self.events))
         for event in self.events:
             event['synthetic_fields'] = [k for k, v in event.items()
                                          if v is not None and k not in {'synthetic_fields', 'is_injected_duplicate'}]
             if event['price'] == '0.00':
                 event['quality_flags'].append('zero_price_review')
-        # El reenvío conserva identidad y contenido; solo cambia la etiqueta de evaluación.
-        originals = [e for e in self.events if e['event_type'] in {'purchase', 'payment_attempt', 'view'}]
-        for event in self.rng.sample(originals, min(self.cfg['n_resends'], len(originals))):
-            self.events.append(dict(event, is_injected_duplicate=True, quality_flags=list(event['quality_flags']),
-                                    synthetic_fields=list(event['synthetic_fields'])))
-        summary = dict(events=len(self.events), by_type=dict(Counter(e['event_type'] for e in self.events)),
-                       flags=len(flagged), themes=len(self.themes),
-                       injected_anomalies=sum(e['is_injected_anomaly'] for e in self.events),
-                       injected_duplicates=sum(e['is_injected_duplicate'] for e in self.events))
-        return self.events, summary
+            seq = write(event)
+            if event['event_type'] in {'purchase', 'payment_attempt', 'view'}:
+                self.candidates += 1
+                self.db.execute('INSERT INTO synthetic_resend_candidates VALUES (?, ?)', (self.candidates, seq))
+            self._count(event)
+        self.events.clear()
+
+    def _count(self, event):
+        self.summary['events'] += 1
+        self.types[event['event_type']] += 1
+        self.summary['injected_anomalies'] += int(event['is_injected_anomaly'])
+        self.summary['injected_duplicates'] += int(event['is_injected_duplicate'])
+
+    def _session(self, kind, index, n_users):
+        user = f'syn:user:{self._id("user", self.rng.randrange(n_users))}'
+        if kind == 'fraud_burst':
+            self.fraud_burst(index)
+        else:
+            getattr(self, kind)(index, user)
+
+    def _tail(self, index, remaining):
+        """Una sesión corta, completa y sin compras para cerrar el presupuesto."""
+        user = f'syn:user:{self._id("tail-user", index)}'
+        session = f'syn:session:{self._id("tail", index)}'
+        theme = self.rng.choices(self.theme_names, self.theme_weights)[0]
+        product = self._pick(theme, 1)[0]
+        when = self._moment()
+        if remaining > 1:
+            self._event('search', when, user, session, query=self._query(product))
+        for offset in range(1 if remaining > 1 else 0, remaining):
+            self._event('view', when + timedelta(seconds=offset), user, session, product)
+        self.summary['tail_events'] += remaining
+        self.scenarios['tail_browsing'] += 1
+
+    def build(self, write, chunk_size, budget=None):
+        """Escribe sesiones acotadas. Los candidatos solo guardan seq en SQLite."""
+        self.db.execute('CREATE TABLE synthetic_resend_candidates(id INTEGER PRIMARY KEY, event_seq INTEGER NOT NULL)')
+        self.summary['flags'] = self.flags()
+        last_commit = 0
+
+        def checkpoint():
+            nonlocal last_commit
+            if self.summary['events'] - last_commit >= chunk_size:
+                self.db.commit()
+                last_commit = self.summary['events']
+
+        if budget is None:
+            n_users = max(1, self.cfg['n_orders'] // 2)
+            for kind, key in (('shopping', 'n_orders'), ('browsing', 'n_browse_sessions'), ('fraud_burst', 'n_fraud_bursts')):
+                for index in range(self.cfg[key]):
+                    self._session(kind, index, n_users)
+                    self.scenarios[kind] += 1
+                    self._flush(write)
+                    checkpoint()
+            resends = min(self.cfg['n_resends'], self.candidates)
+            self.summary['resend_selection'] = 'sqlite_without_replacement'
+        else:
+            target = budget['dynamic_originals']
+            n_users = max(1, int(target * self.cfg['users_per_event']))
+            kinds = ('shopping', 'browsing', 'fraud_burst')
+            weights = [self.cfg['scenario_weights'][kind] for kind in kinds]
+            index = 0
+            while self.summary['events'] < target:
+                remaining = target - self.summary['events']
+                kind = self.rng.choices(kinds, weights)[0]
+                # Las órdenes de una sesión que no cabe se deshacen antes de escribir eventos.
+                self.db.execute('SAVEPOINT candidate_session')
+                self._session(kind, index, n_users)
+                self.summary['max_session_events'] = max(self.summary['max_session_events'], len(self.events))
+                if len(self.events) > remaining:
+                    self.db.execute('ROLLBACK TO candidate_session')
+                    self.events.clear()
+                    self._tail(index, remaining)
+                else:
+                    self.scenarios[kind] += 1
+                self.db.execute('RELEASE candidate_session')
+                self._flush(write)
+                checkpoint()
+                index += 1
+            resends = budget['dynamic_resends']
+        if resends and not self.candidates:
+            raise ValueError('No hay eventos originales elegibles para reenvíos')
+        candidate_count = self.candidates
+        for _ in range(resends):
+            chosen = self.rng.randint(1, candidate_count)
+            payload = self.db.execute(
+                'SELECT e.payload FROM synthetic_resend_candidates c JOIN events e ON e.seq=c.event_seq WHERE c.id=?',
+                (chosen,)).fetchone()[0]
+            event = json.loads(payload)
+            event['is_injected_duplicate'] = True
+            write(event)
+            self._count(event)
+            if budget is None:
+                # Muestreo sin reemplazo, con índices densos, sin una lista en RAM.
+                last = self.db.execute('SELECT event_seq FROM synthetic_resend_candidates WHERE id=?', (candidate_count,)).fetchone()[0]
+                self.db.execute('UPDATE synthetic_resend_candidates SET event_seq=? WHERE id=?', (last, chosen))
+                self.db.execute('DELETE FROM synthetic_resend_candidates WHERE id=?', (candidate_count,))
+                candidate_count -= 1
+            checkpoint()
+        self.summary.update(by_type=dict(self.types), scenarios=dict(self.scenarios),
+                            resend_candidates=self.candidates, user_pool_size=n_users)
+        self.db.execute('DROP TABLE synthetic_resend_candidates')
+        self.db.commit()
+        return self.summary
 
 
-def generate(db, run, seed, start, end, cfg, envelope):
-    return Generator(db, run, seed, start, end, cfg, envelope).build()
+def generate(db, run, seed, start, end, cfg, envelope, write, chunk_size, budget=None):
+    return Generator(db, run, seed, start, end, cfg, envelope).build(write, chunk_size, budget)

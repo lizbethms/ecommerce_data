@@ -64,6 +64,27 @@ class TestAPI(unittest.TestCase):
         self.assertEqual(conflicto['estado'], 'rechazado')
         self.assertEqual(self.api.get('/productos/A').json()['vistas'], 1)
 
+    def test_lote_desordenado_normaliza_y_recalcula_prioridad(self):
+        # El evento más reciente llega primero. La última observación temporal
+        # debe fijar el precio, mientras la respuesta conserva el orden de entrada.
+        r = self.lote([
+            evento('reciente', ' VIEW ', 5, 'A', price='210.00', priority=999),
+            evento('antiguo', 'view', 1, 'A', price='200.00',
+                   event_time='2019-10-01T05:01:00-05:00'),
+            compra('express', 3, 'A', 'o-express', 'express', priority=-1),
+            pago('fallido', 4, 'o-fallido', 'failed'),
+        ])
+        self.assertEqual(r['resumen'], {'aceptado': 4})
+        self.assertEqual([e['event_id'] for e in r['resultados']],
+                         ['reciente', 'antiguo', 'express', 'fallido'])
+        self.assertEqual([e['prioridad'] for e in r['resultados']], [0, 0, 10, 100])
+        producto = self.api.get('/productos/A').json()
+        self.assertEqual(producto['price'], '210.00')
+        self.assertEqual(producto['vistas'], 2)
+        self.assertEqual(producto['stock'], 9)
+        self.assertEqual(self.api.get('/panel').json()['actividad']['primer_evento'],
+                         '2019-10-01T10:01:00Z')
+
     def test_prioridad_alerta_express_estandar_programada(self):
         self.api.post('/fraude/senalados', params={'tipo': 'payment_method', 'valor': 'robado'})
         self.lote([

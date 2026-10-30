@@ -5,3 +5,9 @@ results/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+
+# Entorno local y archivos de referencia voluminosos
+.venv/
+.DS_Store
+/10M.csv
+/docs/referencias/*.zip

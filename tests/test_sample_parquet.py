@@ -17,7 +17,7 @@ from src.data.parquet_io import EVENT_SCHEMA, iter_events
 from src.data.prepare import prepare
 from src.data.sample import sample_sessions
 from src.data.schema import SOURCE_COLUMNS, validate
-from src.pipeline.stage0 import run_stage0
+from src.pipeline.runner import run_pipeline
 
 CONFIG = dict(seed=7, chunk_size=16, order_window_minutes=30, queue_capacity=8, rate=10000,
               burst_size=10, burst_interval=0.0, historical_speed=3600)
@@ -65,7 +65,7 @@ class TestSampleParquet(unittest.TestCase):
                 validate(e)
             tipos = {e['event_type'] for e in leidos}
             self.assertTrue({'search', 'payment_attempt', 'return', 'review', 'purchase'} <= tipos)
-            stats = asyncio.run(run_stage0(tmp / 'out/events.parquet', tmp / 'replay.jsonl', CONFIG))
+            stats = asyncio.run(run_pipeline(tmp / 'out/events.parquet', tmp / 'replay.jsonl', CONFIG))
             self.assertEqual(stats['consumed'], len(leidos))
 
 

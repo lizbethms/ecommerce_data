@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .schema import SOURCE_COLUMNS, money, stable_id, utc, validate
+from .configuration import event_budget, normalize_synthetic
 
 
 def digest_file(path):
@@ -80,12 +81,13 @@ class Writer:
                     raise ValueError('Devolución inconsistente')
                 db.execute('UPDATE purchases SET returned=returned+? WHERE event_id=?', (event['quantity'], event['original_purchase_event_id']))
                 db.execute('UPDATE inventory SET stock=stock+?, returned=returned+? WHERE product_id=?', (event['quantity'], event['quantity'], event['product_id']))
-        db.execute('INSERT INTO events(event_id,time,payload) VALUES (?, ?, ?)',
-                   (event['event_id'], event['event_time'], json.dumps(event, ensure_ascii=False, sort_keys=True)))
+        cursor = db.execute('INSERT INTO events(event_id,time,payload) VALUES (?, ?, ?)',
+                            (event['event_id'], event['event_time'], json.dumps(event, ensure_ascii=False, sort_keys=True)))
         self.count += 1
         self.types[event['event_type']] += 1
         self.origins[event['event_origin']] += 1
         self.quality.update(event['quality_flags'])
+        return cursor.lastrowid
 
 
 def envelope(run, event_id, time, kind, origin, user, session, product=None):
@@ -116,7 +118,7 @@ def controlled_events(db, run, seed, start):
                          utc((base + timedelta(seconds=offset)).isoformat()), kind,
                          'synthetic', 'syn:user:demo', 'syn:session:demo', product[0])
         event.update(category_id=product[1], category_code=product[2], brand=product[3], price=product[4],
-                     order_id=order, delivery_type=delivery, scenario_id='controlled-stage0',
+                     order_id=order, delivery_type=delivery, scenario_id='controlled-ingestion',
                      priority=10 if delivery == 'express' else 0,
                      priority_reason='express_delivery' if delivery == 'express' else 'normal')
         if delivery == 'scheduled':
@@ -182,25 +184,60 @@ def export_events(db, output, output_format, batch_size):
     return {'events.parquet': None, **write_entities(db, output, batch_size)}
 
 
+def load_catalog(source, db, row_limit, chunk_size):
+    """Catálogo y rango temporal para 100% sintético; no agrega eventos reales."""
+    first = last = None
+    rows = 0
+    with source.open(newline='', encoding='utf-8') as stream:
+        reader = csv.DictReader(stream)
+        if tuple(reader.fieldnames or ()) != SOURCE_COLUMNS:
+            raise ValueError('Cabecera distinta al esquema REES46')
+        for row in reader:
+            if None in row or any(value is None for value in row.values()):
+                raise ValueError('Cantidad de columnas inválida en la fuente del catálogo')
+            when = utc(row['event_time'])
+            if last and when < last:
+                raise ValueError('Retroceso temporal en la fuente del catálogo')
+            first, last = first or when, when
+            db.execute('INSERT OR REPLACE INTO catalog VALUES (?, ?, ?, ?, ?, ?)',
+                       (row['product_id'], row['category_id'], row['category_code'] or None,
+                        row['brand'] or None, money(row['price']), when))
+            rows += 1
+            if rows % chunk_size == 0:
+                db.commit()
+            if rows >= row_limit:
+                break
+    return first, last, rows
+
+
 def prepare(source, output, size, config, output_format='jsonl', synthetic=None):
     source, output = Path(source).resolve(), Path(output).resolve()
+    config = dict(config)
+    synthetic = synthetic if synthetic is not None else config.get('synthetic')
+    if synthetic is not None:
+        synthetic = normalize_synthetic(synthetic)
+        config['synthetic'] = synthetic
+    budget = event_budget(size, synthetic, SCENARIO_SIZE) if synthetic and 'fraction' in synthetic else None
+    if synthetic and budget is None and size is not None:
+        raise ValueError('Para size exacto use synthetic.fraction; los conteos por escenarios requieren sample/--all-source')
+    controlled_size = budget['controlled'] if budget else SCENARIO_SIZE
     if output_format not in {'jsonl', 'parquet'}:
         raise ValueError('Formato de salida: jsonl o parquet')
-    if size is not None and size < SCENARIO_SIZE + 2:
+    config['format'] = output_format
+    if budget is None and size is not None and size < SCENARIO_SIZE + 2:
         raise ValueError(f'Tamaño mínimo: {SCENARIO_SIZE + 2}')
-    if config['chunk_size'] <= 0 or config['order_window_minutes'] <= 0:
-        raise ValueError('Bloque y ventana deben ser positivos')
+    if any(type(config[key]) is not int or config[key] <= 0 for key in ('chunk_size', 'order_window_minutes')):
+        raise ValueError('Bloque y ventana deben ser enteros positivos')
     if output == source or source in output.parents:
         raise ValueError('La salida debe estar separada del CSV')
     output.mkdir(parents=True, exist_ok=False)
     source_hash = digest_file(source)
-    # Sin escenarios extra la identidad de la corrida queda igual que antes.
-    extra_identity = [json.dumps(synthetic, sort_keys=True)] if synthetic else []
-    run = stable_id(source_hash, size, json.dumps(config, sort_keys=True), *extra_identity)
+    run = stable_id('streaming-v2', source_hash, size, json.dumps(config, sort_keys=True))
     db = connect(output / 'entities.sqlite')
     writer = Writer(db)
     source_count = 0
-    selected_limit = None if size is None else size - SCENARIO_SIZE
+    selected_limit = budget['real'] if budget else (None if size is None else size - SCENARIO_SIZE)
+    catalog_source_rows = 0
     missing_sessions = 0
     candidates = 0
     conflicts = 0
@@ -273,30 +310,44 @@ def prepare(source, output, size, config, output_format='jsonl', synthetic=None)
                     db.commit()
             # Nunca se supone que el prefijo cierre sesiones u órdenes.
             truncated = next(reader, None) is not None
+        if budget and budget['real'] == 0:
+            first_time, last_time, catalog_source_rows = load_catalog(
+                source, db, synthetic['catalog_source_rows'], config['chunk_size'])
+            truncated = False
         if not last_time:
             raise ValueError('Fuente vacía')
-        scenarios = controlled_events(db, run, config['seed'], last_time)
-        if len(scenarios) != SCENARIO_SIZE:
+        scenarios = controlled_events(db, run, config['seed'], last_time) if controlled_size else []
+        if len(scenarios) != controlled_size:
             raise AssertionError('Reserva de escenarios inconsistente')
         for event in scenarios:
             writer.add(event)
-        if synthetic:
+        if synthetic and (budget is None or budget['dynamic']):
             from .synthetic import generate
-            extra, synthetic_summary = generate(db, run, config['seed'], first_time, last_time, synthetic, envelope)
-            for event in extra:
-                writer.add(event)
+            synthetic_summary = generate(db, run, config['seed'], first_time, last_time, synthetic,
+                                         envelope, writer.add, config['chunk_size'], budget)
         db.execute('CREATE INDEX events_time ON events(time,seq)')
         db.execute('CREATE INDEX events_identity ON events(event_id)')
         db.commit()
         validations = validate_dataset(db)
+        if size is not None:
+            validations['exact_size'] = writer.count == size
+            if not validations['exact_size']:
+                raise ValueError(f'Conteo generado {writer.count} distinto al solicitado {size}')
+        if budget:
+            validations['origin_budget_matched'] = (
+                writer.origins['real'] == budget['real'] and writer.origins['synthetic'] == budget['synthetic'])
+            if not validations['origin_budget_matched']:
+                raise ValueError('Conteos por origen distintos al presupuesto')
         artifacts = export_events(db, output, output_format, config['chunk_size'])
         artifacts['entities.sqlite'] = None
-        manifest = dict(schema_version='1.0', generation_run_id=run, seed=config['seed'], config=config,
-                        source={'path': str(source), 'sha256': source_hash, 'rows_selected': source_count},
-                        selection={'rule': 'chronological_prefix_plus_reserved_scenarios', 'requested_events': size,
-                                   'reserved_scenario_events': SCENARIO_SIZE, 'synthetic_config': synthetic,
+        manifest = dict(schema_version='1.0', generator_version='streaming-v2',
+                        profile=config.get('profile'), generation_run_id=run, seed=config['seed'], config=config,
+                        source={'path': str(source), 'sha256': source_hash, 'rows_selected': source_count,
+                                'catalog_only_rows': catalog_source_rows},
+                        selection={'rule': 'event_budget' if budget else 'chronological_prefix_plus_reserved_scenarios', 'requested_events': size,
+                                   'budget': budget, 'reserved_scenario_events': controlled_size, 'synthetic_config': synthetic,
                                    'synthetic_summary': synthetic_summary, 'prefix_may_cut_sessions_or_orders': truncated,
-                                   'last_source_row': boundary_session, 'dependency_policy': 'real_groups_are_prefix_only;controlled_orders_complete'},
+                                   'last_source_row': boundary_session, 'dependency_policy': 'real_groups_are_prefix_only;synthetic_sessions_complete'},
                         counts={'total': writer.count, 'by_type': dict(writer.types), 'by_origin': dict(writer.origins),
                                 'synthetic_fraction': writer.origins['synthetic'] / writer.count,
                                 'source_duplicate_candidates': candidates, 'missing_sessions_isolated': missing_sessions,
@@ -305,7 +356,9 @@ def prepare(source, output, size, config, output_format='jsonl', synthetic=None)
                         output_format=output_format,
                         artifacts={name: digest_file(output / name) for name in artifacts},
                         environment={'python': platform.python_version(), 'platform': platform.platform()},
-                        code_sha256=digest_file(__file__))
+                        code_sha256=digest_file(__file__),
+                        generator_code_sha256={name: digest_file(Path(__file__).with_name(name))
+                                               for name in ('prepare.py', 'synthetic.py', 'configuration.py')})
         (output / 'manifest.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + '\n')
         return manifest
     finally:
@@ -356,6 +409,8 @@ POLICIES = {
     'priority': 'failed payment=100; express=10; normal=0; evaluation labels never consulted',
     'timestamps': 'event_time preserved in UTC; ingested_at assigned by replay',
     'evaluation': 'injected labels evaluate simulation only; no real fraud claims',
-    'demo_synthetic': 'optional; syn: namespace; themed multi-product orders, returns, reviews, flagged entities, payment bursts and resends; fixed seed',
+    'demo_synthetic': 'optional; syn: namespace; bounded sessions; seeded themed orders, browsing and fraud bursts; SQLite resend candidates',
+    'synthetic_budget': 'half-up fractions; controlled events and dynamic resends included in N; short browsing session closes remainder',
+    'synthetic_memory': 'one session plus configured catalog_limit products and export chunk; candidates and global time sorting in SQLite on disk',
     'parquet': 'timestamps as UTC timestamp[us]; money as decimal128(12,2); readers restore the textual contract',
 }

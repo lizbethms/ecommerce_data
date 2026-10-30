@@ -19,8 +19,24 @@ def create_app(config=None):
         yield
 
     app = FastAPI(title='API de servicios de comercio electrónico', version='1.0', lifespan=lifespan,
-                  description='Demo funcional: ingesta, priorización, catálogo, relacionados, fraude, '
-                              'co-compra y servicio sobre la muestra Parquet.')
+                  description='''Demo técnica de comercio electrónico. El guion y la
+ejecución reproducible están documentados en `README.md` y `notebooks/01_demo_tecnica.ipynb`.
+
+**Recorrido sugerido (3–4 minutos):**
+1. Prioridades: `POST /eventos/lote` → `GET /ordenes/cola` → `POST /ordenes/atender`.
+2. Filtrado probabilístico: `/fraude/senalados`, `/fraude/verificar` y `/fraude/estadisticas`.
+   Los positivos y las estimaciones se verifican con registros exactos.
+3. Similitud: comparar `knn`, `hnsw` y `minhash` en `/productos/{id}/similares`.
+   El endpoint HNSW también ejecuta KD-Tree; su latencia no mide HNSW puro.
+4. Grafo: `/cocompra/pares`, `/cocompra/influyentes` y `/cocompra/comunidades`.
+   Los productos son nodos; los pares son aristas y el peso cuenta órdenes distintas.
+   V y E son resultados del tráfico, no se igualan al número de eventos.
+5. Servicio: `/buscar/autocompletar`, `/buscar`, recomendaciones y `/panel`.
+
+El estado reside en memoria. Reiniciar la API restablece el estado; atender órdenes
+consume la cola. El notebook utiliza una aplicación aislada y exporta JSON, tablas
+y figuras sin modificar un servidor que ya esté corriendo.
+''')
     for modulo in (eventos, ordenes, productos, fraude, cocompra, servicio):
         app.include_router(modulo.router)
 
