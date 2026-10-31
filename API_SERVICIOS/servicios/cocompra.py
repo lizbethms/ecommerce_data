@@ -3,10 +3,11 @@
 El peso de la arista (a, b) es el número de órdenes distintas que contienen a
 ambos productos. Cada par se cuenta una vez por orden (HashTable order_id ->
 productos), así que un reenvío o una segunda unidad no lo duplican. PageRank
-da los productos influyentes y Louvain las agrupaciones de consumo. Ambos se
-recalculan en diferido, solo cuando el grafo cambió.
+da los productos influyentes y Louvain las agrupaciones de consumo; Label
+Propagation ofrece una partición alternativa sobre el mismo subgrafo para
+compararlas. Todos se recalculan en diferido, solo cuando el grafo cambió.
 """
-from src.structures.graph import WeightedGraph, louvain, modularity, pagerank
+from src.structures.graph import WeightedGraph, label_propagation, louvain, modularity, pagerank
 from src.structures.hash_table import HashTable
 from src.structures.topk import top_k
 
@@ -23,6 +24,8 @@ class ServicioCoCompra(Servicio):
         self.por_orden = HashTable(1024)
         self.version = 0
         self._calculado = None  # (versión, pagerank, partición, modularidad)
+        self._subgrafo = None
+        self._lp = None  # (partición, modularidad) de Label Propagation para la versión calculada
 
     def procesar(self, evento, contexto):
         pid, orden = evento['product_id'], evento['order_id']
@@ -47,7 +50,15 @@ class ServicioCoCompra(Servicio):
             rank = pagerank(sub)
             particion = louvain(sub, seed=self.config.semilla)
             self._calculado = (self.version, rank, particion, modularity(sub, particion) if particion else 0.0)
+            self._subgrafo, self._lp = sub, None
         return self._calculado[1:]
+
+    def _label_propagation(self):
+        self._analisis()
+        if self._lp is None:
+            particion = label_propagation(self._subgrafo, seed=self.config.semilla)
+            self._lp = (particion, modularity(self._subgrafo, particion) if particion else 0.0)
+        return self._lp
 
     def pares(self, k=10):
         return [{'producto_a': u, 'producto_b': v, 'ordenes_compartidas': w}
@@ -59,8 +70,12 @@ class ServicioCoCompra(Servicio):
                  'vecinos': len(self.grafo.neighbors(p))}
                 for p, r in top_k(rank.items(), k, key=lambda item: item[1])]
 
-    def comunidades(self, min_tamano=2, limite=20, top=5):
+    def comunidades(self, min_tamano=2, limite=20, top=5, metodo='louvain'):
         rank, particion, q = self._analisis()
+        if metodo == 'label_propagation':
+            particion, q = self._label_propagation()
+        elif metodo != 'louvain':
+            raise ValueError('Método: louvain o label_propagation')
         grupos = {}
         for producto, comunidad in particion.items():
             grupos.setdefault(comunidad, []).append(producto)
@@ -72,7 +87,8 @@ class ServicioCoCompra(Servicio):
             salida.append({'comunidad': comunidad, 'tamano': len(miembros), 'principales': principales})
             if len(salida) >= limite:
                 break
-        return {'modularidad': round(q, 4), 'comunidades_totales': len(grupos), 'comunidades': salida}
+        return {'metodo': metodo, 'modularidad': round(q, 4), 'comunidades_totales': len(grupos),
+                'comunidades': salida}
 
     def comunidad_de(self, product_id):
         _, particion, _ = self._analisis()

@@ -126,16 +126,17 @@ class ServicioIngesta(Servicio):
             self.vistos[evento['event_id']] = firma
         # Los aceptados se despachan en orden temporal; el desempate es el orden de llegada.
         for indice, evento, _ in merge_sort(nuevos, key=lambda item: (item[1]['event_time'], item[0])):
-            contexto = {}
+            contexto, servicios = {}, []
             for servicio in self.suscriptores:
                 if servicio.acepta(evento):
+                    servicios.append(servicio.nombre)
                     salida = servicio.recibir(evento, contexto)
                     if salida is not None:
                         contexto[servicio.nombre] = salida
             self.aceptados += 1
             self.procesados += 1
             resultados[indice] = {'event_id': evento['event_id'], 'estado': 'aceptado',
-                                  'prioridad': evento['priority'], 'resultados': contexto}
+                                  'prioridad': evento['priority'], 'servicios': servicios, 'resultados': contexto}
         return resultados
 
     def estadisticas(self):

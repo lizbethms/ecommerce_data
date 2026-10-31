@@ -2,8 +2,9 @@
 from pathlib import Path
 import csv
 import os
+import tempfile
 
-os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/eda-mpl")
+os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "eda-mpl"))
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -11,7 +12,9 @@ import matplotlib.pyplot as plt
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "docs" / "informe_figuras"
 OUT.mkdir(parents=True, exist_ok=True)
-SCALES = ("1K", "10K", "100K", "1M")
+# Escalas con informe generado (paso 4 del README); 10M entra cuando su informe existe.
+SCALES = tuple(s for s in ("1K", "10K", "100K", "1M", "10M")
+               if (ROOT / "results" / f"flujo_{s}" / "informe" / "tablas").is_dir())
 
 
 def rows(path):

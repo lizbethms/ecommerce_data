@@ -16,6 +16,10 @@ class Config:
     dir_datos: Path | None = field(default_factory=_ruta_datos)
     precargar: bool = field(default_factory=lambda: os.environ.get('PRECARGAR', '0') == '1')
     tamano_lote: int = 512
+    # Etapa 0 en la API: capacidad de la FIFO (eventos) y tamaño máximo del lote que forma el consumidor.
+    # La capacidad cubre una petición completa (MAX_LOTE) para que un lote no se parta entre consumos.
+    capacidad_fifo: int = 10000
+    lote_fifo: int = 5000
 
     # Catálogo
     lru_capacidad: int = 256

@@ -1,11 +1,16 @@
-"""Grafo no dirigido ponderado, PageRank ponderado y Louvain.
+"""Grafo no dirigido ponderado, PageRank ponderado, Louvain y Label Propagation.
 
 PageRank: O(I·(V + E)) para I iteraciones (método de potencias); la masa de
 los nodos sin aristas se reparte uniformemente.
 Louvain (Blondel et al., 2008): movimientos locales que maximizan la ganancia
 de modularidad, seguidos de agregación de comunidades. Cada pasada cuesta
 O(E) y en la práctica se hacen pocas pasadas.
+Label Propagation (Raghavan et al., 2007): cada nodo adopta la etiqueta de
+mayor peso entre sus vecinos. Cada pasada cuesta O(V + E); no optimiza la
+modularidad de forma explícita.
+NMI y ARI comparan dos particiones de los mismos nodos (estabilidad y acuerdo).
 """
+import math
 import random
 
 
@@ -165,8 +170,85 @@ def louvain(graph, resolution=1.0, seed=2026, max_levels=10):
             break
         partition = {u: community[c] for u, c in partition.items()}
         adj = _aggregate(adj, community)
+    return _by_size(partition)
+
+
+def label_propagation(graph, seed=2026, max_iter=100):
+    """Partición {nodo: comunidad} con etiquetas 0..C-1 (las más grandes primero).
+
+    Asíncrona: los nodos se visitan en orden aleatorio y cada uno toma la etiqueta
+    con mayor peso acumulado entre sus vecinos. Un nodo conserva su etiqueta si ya
+    está entre las mejores; los demás empates se rompen al azar. Termina cuando
+    ninguna etiqueta cambia en una pasada completa o tras max_iter pasadas.
+    """
+    rng = random.Random(seed)
+    label = {u: u for u in graph.adj}
+    order = list(graph.adj)
+    for _ in range(max_iter):
+        rng.shuffle(order)
+        changed = False
+        for u in order:
+            weights = {}
+            for v, w in graph.adj[u].items():
+                weights[label[v]] = weights.get(label[v], 0) + w
+            if not weights:
+                continue
+            best = max(weights.values())
+            candidates = [c for c, w in weights.items() if w == best]
+            if label[u] not in candidates:
+                label[u] = rng.choice(candidates)
+                changed = True
+        if not changed:
+            break
+    return _by_size(label)
+
+
+def _by_size(partition):
+    """Reetiqueta 0..C-1, las comunidades más grandes primero (desempate estable)."""
     sizes = {}
     for c in partition.values():
         sizes[c] = sizes.get(c, 0) + 1
     labels = {c: i for i, c in enumerate(sorted(sizes, key=lambda c: (-sizes[c], str(c))))}
     return {u: labels[c] for u, c in partition.items()}
+
+
+def _contingency(a, b):
+    if a.keys() != b.keys():
+        raise ValueError('Las particiones deben cubrir los mismos nodos')
+    table, rows, cols = {}, {}, {}
+    for u, ca in a.items():
+        cb = b[u]
+        table[ca, cb] = table.get((ca, cb), 0) + 1
+        rows[ca] = rows.get(ca, 0) + 1
+        cols[cb] = cols.get(cb, 0) + 1
+    return table, rows, cols
+
+
+def normalized_mutual_info(a, b):
+    """NMI con normalización aritmética, en [0, 1]; 1 = la misma agrupación."""
+    n = len(a)
+    table, rows, cols = _contingency(a, b)
+    if not n:
+        return 1.0
+    entropy = lambda counts: -sum(c / n * math.log(c / n) for c in counts.values())
+    ha, hb = entropy(rows), entropy(cols)
+    if ha == hb == 0:
+        return 1.0
+    mi = sum(nij / n * math.log(n * nij / (rows[i] * cols[j])) for (i, j), nij in table.items())
+    return 2 * mi / (ha + hb)
+
+
+def adjusted_rand_index(a, b):
+    """ARI (Hubert y Arabie, 1985): 1 = la misma agrupación; ≈ 0 = acuerdo esperado por azar."""
+    n = len(a)
+    table, rows, cols = _contingency(a, b)
+    pairs = lambda x: x * (x - 1) / 2
+    if n < 2:
+        return 1.0
+    index = sum(pairs(v) for v in table.values())
+    sum_a, sum_b = sum(pairs(v) for v in rows.values()), sum(pairs(v) for v in cols.values())
+    expected = sum_a * sum_b / pairs(n)
+    maximum = (sum_a + sum_b) / 2
+    if maximum == expected:
+        return 1.0
+    return (index - expected) / (maximum - expected)

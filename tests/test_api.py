@@ -115,6 +115,28 @@ class TestAPI(unittest.TestCase):
         estados = {a.get('order_id'): a['estado'] for a in self.api.post('/ordenes/atender', params={'n': 10}).json()['atendidos']}
         self.assertEqual(estados['o-r'], 'retenida_por_fraude')
 
+    def test_una_orden_recorre_las_diez_etapas(self):
+        r = self.lote([pago('p1', 1, 'o1', estado='failed'), compra('c1', 2, 'A', 'o1'), compra('c2', 2, 'B', 'o1')])
+        recorridos = {x['event_id']: x['recorrido'] for x in r['resultados']}
+        self.assertIn(6, recorridos['p1']['etapas'])      # el pago pasa por fraude
+        self.assertIn(8, recorridos['c1']['etapas'])      # la compra entra al grafo
+        self.assertEqual(set().union(*(set(x['etapas']) for x in recorridos.values())), set(range(10)))
+        self.assertTrue(all(x['espera_fifo_ms'] >= 0 and x['tamano_lote'] == 3 for x in recorridos.values()))
+        fifo = self.api.get('/admin/estadisticas').json()['fifo']
+        self.assertEqual((fifo['eventos'], fifo['en_cola']), (3, 0))
+        # Salidas observables: la alerta del pago sale primero de la cola y el par entra al grafo.
+        self.assertEqual(self.api.get('/ordenes/cola').json()['siguientes'][0]['clase'], 'alerta')
+        self.assertEqual(self.api.get('/cocompra/pares').json()[0]['ordenes_compartidas'], 1)
+
+    def test_contrapresion_con_fifo_pequena(self):
+        with TestClient(create_app(Config(dir_datos=None, capacidad_fifo=2, lote_fifo=2))) as api:
+            r = api.post('/eventos/lote', json=[evento(f'v{i}', 'view', i, 'A') for i in range(7)]).json()
+            self.assertEqual(r['resumen'], {'aceptado': 7})
+            fifo = api.get('/admin/estadisticas').json()['fifo']
+            self.assertGreater(fifo['puts_bloqueados'], 0)
+            self.assertLessEqual(fifo['pico'], 2)
+            self.assertGreaterEqual(fifo['lotes'], 4)
+
     def test_cocompra_idempotente(self):
         primera = [compra('a1', 1, 'A', 'o1'), compra('b1', 1, 'B', 'o1')]
         self.lote(primera)
@@ -127,6 +149,10 @@ class TestAPI(unittest.TestCase):
         self.assertEqual(sugerencias[0]['product_id'], 'B')
         self.assertEqual(len(self.api.get('/cocompra/influyentes', params={'k': 3}).json()), 3)
         self.assertIn('modularidad', self.api.get('/cocompra/comunidades', params={'min_tamano': 1}).json())
+        lp = self.api.get('/cocompra/comunidades', params={'min_tamano': 1, 'metodo': 'label_propagation'}).json()
+        self.assertEqual(lp['metodo'], 'label_propagation')
+        self.assertEqual(sum(c['tamano'] for c in lp['comunidades']), 3)  # A, B y C co-comprados
+        self.assertEqual(self.api.get('/cocompra/comunidades', params={'metodo': 'otro'}).status_code, 422)
 
     def test_catalogo_busqueda_recomendacion_y_panel(self):
         self.lote([evento('v1', 'view', 1, 'A'), evento('v2', 'view', 1, 'B'), evento('v3', 'view', 1, 'C'),

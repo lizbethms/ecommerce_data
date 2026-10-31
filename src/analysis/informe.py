@@ -8,6 +8,7 @@ os.environ.setdefault('MPLCONFIGDIR', str(Path(tempfile.gettempdir()) / 'ecommer
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 import pandas as pd
 
 
@@ -43,6 +44,19 @@ def export_report(evidence, output, memory_evidence=None):
         mediana_ms=('latencia_ms', 'median'), p95_ms=('latencia_ms', lambda s: s.quantile(.95)),
         observaciones=('latencia_ms', 'size'), consultas_distintas=('consulta', 'nunique'),
         recall_empates=('recall_empates', 'mean'))
+    # La desviación global mezcla dos fuentes; se separan: ruido de repetir la misma consulta
+    # (media de las desviaciones por consulta) y diferencia entre consultas (desviación de sus medias).
+    per_query = measurements.groupby(['familia', 'algoritmo', 'consulta'], as_index=False).agg(
+        media_ms=('latencia_ms', 'mean'), desviacion_ms=('latencia_ms', 'std'),
+        repeticiones=('latencia_ms', 'size'), recall_empates=('recall_empates', 'mean'))
+    summary = summary.merge(per_query.groupby(['familia', 'algoritmo'], as_index=False).agg(
+        desviacion_repeticiones_ms=('desviacion_ms', 'mean'), desviacion_consultas_ms=('media_ms', 'std')),
+        on=['familia', 'algoritmo'])
+    sweep = pd.DataFrame(evidence.get('barrido_similitud', []))
+    sweep_summary = (sweep.groupby(['familia', 'algoritmo', 'parametro', 'valor', 'k'], as_index=False, sort=False).agg(
+        recall_empates=('recall_empates', 'mean'), latencia_ms_media=('latencia_ms_media', 'mean'),
+        candidatos_media=('candidatos', 'mean'), consultas=('consulta', 'nunique'))
+        if not sweep.empty else pd.DataFrame())
     coverage = pd.DataFrame([
         dict(requisito='Prioridades', evidencia='prioridades.csv; control.consultas',
              conclusion='Alerta → express → estándar → programada en el escenario controlado'),
@@ -50,8 +64,10 @@ def export_report(evidence, output, memory_evidence=None):
              conclusion='Pertenencia e intensidad se verifican con registros exactos'),
         dict(requisito='Similitud vectorial y de conjuntos', evidencia='similitud_resumen.csv; vecinos*.csv',
              conclusion='Referencias exhaustivas sobre el índice completo; calidad con empates'),
-        dict(requisito='Grafo', evidencia='grafo_resumen.csv; nodos.csv; aristas.csv; comunidades.csv',
-             conclusion='Grafo inducido por compras aceptadas; Label Propagation pendiente'),
+        dict(requisito='Grafo', evidencia='grafo_resumen.csv; nodos.csv; aristas.csv; comunidades.csv; '
+                                          'comunidades_comparacion.csv; comunidades_estabilidad.csv',
+             conclusion='Grafo inducido por compras aceptadas; Louvain y Label Propagation sobre el mismo subgrafo'
+             if g.get('comparacion_comunidades') else 'Grafo inducido por compras aceptadas; Label Propagation pendiente'),
         dict(requisito='Servicio al usuario', evidencia='busqueda.csv; complementarios.csv; recomendaciones.csv',
              conclusion='Búsqueda, similitud y co-compra alimentan respuestas de la API'),
     ])
@@ -85,6 +101,9 @@ def export_report(evidence, output, memory_evidence=None):
         'pagos_historico': pd.DataFrame(evidence['pagos_historico']),
         'similitud_mediciones': measurements,
         'similitud_resumen': summary,
+        'similitud_por_consulta': per_query,
+        'similitud_barrido': sweep,
+        'similitud_barrido_resumen': sweep_summary,
         'vecinos': pd.DataFrame(evidence['vecinos']),
         'vecinos_conjuntos': pd.DataFrame(evidence['vecinos_conjuntos']),
         'grafo_resumen': pd.DataFrame([g['resumen']]),
@@ -92,6 +111,11 @@ def export_report(evidence, output, memory_evidence=None):
         'nodos': nodes,
         'aristas': pd.DataFrame(g['aristas'], columns=['producto_a', 'producto_b', 'ordenes_compartidas']),
         'comunidades': pd.DataFrame(g['comunidades'], columns=['comunidad', 'productos']),
+        # Evidencias anteriores a la comparación no traen estas claves; quedan como tablas vacías.
+        'comunidades_lp': pd.DataFrame(g.get('comunidades_lp', []), columns=['comunidad', 'productos']),
+        'comunidades_comparacion': pd.DataFrame(g.get('comparacion_comunidades', [])),
+        'comunidades_estabilidad': pd.DataFrame(g.get('estabilidad_comunidades', [])),
+        'tiempos_grafo': pd.DataFrame(g.get('tiempos_grafo', [])),
         'busqueda': pd.DataFrame(evidence['servicio']['busqueda']['resultados']),
         'rango_precios': pd.DataFrame(evidence['servicio']['rango']['resultados']),
         'complementarios': pd.DataFrame(evidence['servicio']['complementarios']),
@@ -181,6 +205,30 @@ def export_report(evidence, output, memory_evidence=None):
              + ('Para conjuntos, un Jaccard máximo de cero puede inflar la calidad aparente; ver referencia_positiva.'
                 if family == 'conjuntos' else ''))
 
+    if not sweep_summary.empty:
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+        panels = (('hnsw', 'HNSW: ef de búsqueda', 'ef'), ('minhash_lsh', 'MinHash/LSH: bandas × filas', ''))
+        for ax, (algorithm, title, prefix) in zip(axes, panels):
+            selected = sweep_summary[sweep_summary['algoritmo'] == algorithm]
+            for k, group in selected.groupby('k'):
+                ax.plot(group['latencia_ms_media'], group['recall_empates'] * 100, 'o-', label=f'recall@{k}')
+                if k != selected['k'].min():
+                    continue  # el parámetro se rotula una sola vez: ambas curvas comparten la latencia
+                for i, (_, row) in enumerate(group.iterrows()):
+                    ax.annotate(f'{prefix}{row["valor"]}', (row['latencia_ms_media'], row['recall_empates'] * 100),
+                                xytext=(4, 6 if i % 2 else -12), textcoords='offset points', fontsize=7)
+            ax.set(xlabel='Latencia media por consulta (ms)', ylabel='Vecinos correctos (%)', ylim=(0, 105),
+                   title=title)
+            ax.grid(alpha=.25)
+            if not selected.empty:
+                ax.legend(fontsize=8)
+        save(fig, '03b_barrido_similitud',
+             'Compromiso entre calidad y latencia sobre los mismos índices: en HNSW solo cambia ef de búsqueda; en LSH '
+             'se reagrupan las mismas 64 firmas MinHash en bandas × filas. Más bandas con menos filas proponen más '
+             'candidatos (más recall y más latencia). Cada punto promedia '
+             f'{int(sweep_summary["consultas"].max())} consultas; la tabla similitud_barrido incluye la probabilidad '
+             'teórica de colisión 1 − (1 − s^r)^b para el k-ésimo Jaccard exacto.')
+
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
     evolution = tables['evolucion_grafo']
     axes[0].plot(evolution['eventos_leidos'], evolution['V'], 'o-', label='Productos (V)')
@@ -216,7 +264,49 @@ def export_report(evidence, output, memory_evidence=None):
          f'Louvain agrupa productos conectados por compras conjuntas. Se muestran {len(communities)} de '
          f'{g["resumen"]["comunidades"]} comunidades, formadas sobre {g["resumen"]["V_analisis"]} productos; '
          f'los {g["resumen"]["aislados"]} productos sin pares quedan fuera. '
-         f'Modularidad={g["resumen"]["modularidad"]:.4f}; una sola partición, sin estudio de estabilidad.')
+         f'Modularidad={g["resumen"]["modularidad"]:.4f}; '
+         + ('la comparación con Label Propagation y la estabilidad entre semillas están en 06b.'
+            if g.get('comparacion_comunidades') else 'una sola partición, sin estudio de estabilidad.'))
+
+    comparison = tables['comunidades_comparacion']
+    if 'algoritmo' in comparison.columns:
+        names = {'louvain': 'Louvain', 'label_propagation': 'Label Propagation'}
+        colors = {'louvain': '#267c9c', 'label_propagation': '#c06c3e'}
+        fig, axes = plt.subplots(1, 2, figsize=(10, 3.6))
+        for name, source in (('louvain', 'comunidades'), ('label_propagation', 'comunidades_lp')):
+            sizes = tables[source]['productos'].sort_values(ascending=False).to_numpy()
+            if len(sizes):
+                axes[0].loglog(range(1, len(sizes) + 1), sizes, 'o-', markersize=3, color=colors[name],
+                               label=f'{names[name]} ({len(sizes)} comunidades)')
+        axes[0].set(xlabel='Puesto de la comunidad por tamaño', ylabel='Productos', title='Distribución de tamaños')
+        for axis in (axes[0].xaxis, axes[0].yaxis):
+            # Números simples; las marcas menores solo se rotulan si el eje abarca poco más de una década.
+            low, high = axis.get_view_interval()
+            axis.set_major_formatter(FuncFormatter(lambda value, _: f'{value:g}'))
+            axis.set_minor_formatter(FuncFormatter(
+                lambda value, _, narrow=high / max(low, 1e-9) < 15: f'{value:g}' if narrow and value >= 1 else ''))
+        axes[0].grid(alpha=.25, which='both')
+        axes[0].legend(fontsize=8)
+        runs = tables['comunidades_estabilidad']
+        for i, (name, group) in enumerate(runs.groupby('algoritmo', sort=False)):
+            # Desplazamiento horizontal fijo por semilla: las particiones idénticas no se ocultan entre sí.
+            offsets = [i - .2 + .4 * j / max(1, len(group) - 1) for j in range(len(group))]
+            axes[1].scatter(offsets, group['modularidad'], color=colors[name], alpha=.7, zorder=3)
+        axes[1].set(xticks=range(len(names)), xticklabels=[names[n] for n in runs['algoritmo'].unique()],
+                    ylabel='Modularidad', xlim=(-.6, len(names) - .4),
+                    title=f'Modularidad con {int(comparison["semillas"].iloc[0])} semillas')
+        axes[1].grid(alpha=.25, axis='y')
+        rows = {r['algoritmo']: r for r in comparison.to_dict('records')}
+        save(fig, '06b_comunidades_comparacion',
+             'Louvain y Label Propagation sobre el mismo subgrafo sin aislados '
+             f'({g["resumen"]["V_analisis"]} productos). Louvain: {rows["louvain"]["comunidades"]} comunidades, '
+             f'modularidad {rows["louvain"]["modularidad"]:.4f}, {rows["louvain"]["tiempo_ms_media"]:.2f} ms. '
+             f'Label Propagation: {rows["label_propagation"]["comunidades"]} comunidades, modularidad '
+             f'{rows["label_propagation"]["modularidad"]:.4f}, {rows["label_propagation"]["tiempo_ms_media"]:.2f} ms. '
+             f'Estabilidad entre semillas (NMI medio): Louvain {rows["louvain"]["nmi_semillas_media"]:.3f}, '
+             f'Label Propagation {rows["label_propagation"]["nmi_semillas_media"]:.3f}. '
+             f'Acuerdo entre algoritmos con la semilla base: NMI {g["resumen"]["nmi_louvain_lp"]:.3f}, '
+             f'ARI {g["resumen"]["ari_louvain_lp"]:.3f}.')
 
     fig, ax = plt.subplots(figsize=(10, 4.8))
     ranked = nodes.dropna(subset=['pagerank']).copy() if not nodes.empty else nodes
@@ -300,11 +390,30 @@ def export_report(evidence, output, memory_evidence=None):
         '`evidencia.json`; la tabla de población y esta sección reflejan el estado anterior a esa prueba.',
         markdown_table(tables['grafo_resumen'][['V_total', 'V_analisis', 'E', 'aislados', 'comunidades', 'modularidad']]),
         '## Similitud', markdown_table(summary.round(5)),
-        'La desviación resume consultas y repeticiones en índices fijos; no representa construcciones independientes. '
+        'desviacion_ms resume todas las observaciones; desviacion_repeticiones_ms es el ruido al repetir la misma '
+        'consulta y desviacion_consultas_ms la diferencia entre consultas (detalle en similitud_por_consulta.csv). '
+        'Los índices son fijos; no representa construcciones independientes. '
         'Con una observación la desviación no es estimable. El tiempo HTTP incluye transporte ASGI, enriquecimiento y referencias '
         'del endpoint; se conserva aparte de la consulta pura.',
-        '## Figuras y pies reutilizables',
     ]
+    if not sweep_summary.empty:
+        notes.extend([
+            '## Barrido de parámetros de similitud',
+            markdown_table(sweep_summary.round(4)),
+            'Los índices son los mismos de la sección anterior. En LSH, candidatos_media indica cuántos productos '
+            'propone el índice; si el k-ésimo Jaccard exacto es bajo, la probabilidad de colisión 1 − (1 − s^r)^b '
+            '(columna prob_colision_k_esimo en similitud_barrido.csv) explica un recall bajo.',
+        ])
+    if 'algoritmo' in comparison.columns:
+        notes.extend([
+            '## Comunidades: Louvain frente a Label Propagation',
+            markdown_table(comparison.round(4)),
+            f'Ambos algoritmos usan el mismo subgrafo sin aislados. El tiempo resume {g["resumen"]["repeticiones"]} '
+            f'repeticiones con la semilla base; la estabilidad compara las particiones de {g["resumen"]["semillas_estabilidad"]} '
+            'semillas por pares (NMI y ARI: 1 = misma agrupación). Acuerdo entre algoritmos con la semilla base: '
+            f'NMI={g["resumen"]["nmi_louvain_lp"]:.4f}, ARI={g["resumen"]["ari_louvain_lp"]:.4f}.',
+        ])
+    notes.append('## Figuras y pies reutilizables')
     for name, caption in captions:
         notes.extend([f'### {name}', f'![{name}](figuras/{name}.png)', caption])
     if memory_evidence is not None:
@@ -314,8 +423,11 @@ def export_report(evidence, output, memory_evidence=None):
         '## Alcance y pendientes',
         'Esta corrida es una demo funcional y un piloto, no sustituye la campaña de 100 repeticiones independientes, '
         'las cinco escalas ni la evaluación completa de memoria por estructura. No se han medido aquí tiempos de construcción aislados. '
-        'PageRank y Louvain se cronometran una vez sobre la misma instantánea completa sin aislados; '
-        'no se estima dispersión con n=1. Label Propagation y estabilidad de comunidades siguen pendientes.',
+        + (f'PageRank, Louvain y Label Propagation se cronometran {g["resumen"]["repeticiones"]} veces sobre la misma '
+           'instantánea completa sin aislados; son repeticiones de cálculo, no reconstrucciones del grafo.'
+           if 'algoritmo' in comparison.columns else
+           'PageRank y Louvain se cronometran una vez sobre la misma instantánea completa sin aislados; '
+           'no se estima dispersión con n=1. Label Propagation y estabilidad de comunidades siguen pendientes.'),
         'El tamaño principal de integración se expresa en eventos. V y E son resultados de las compras aceptadas; '
         'no se fuerza un catálogo sintético para igualar el número de eventos. La suficiencia de esta interpretación '
         'para las escalas obligatorias del curso sigue sujeta a confirmación docente.',
@@ -323,8 +435,13 @@ def export_report(evidence, output, memory_evidence=None):
         'no deben atribuirse automáticamente a colisiones. La FPR del escenario aislado no caracteriza el tráfico completo.',
         'La API admite compras bloqueadas en sus otros servicios y retiene la orden al atenderla. El grafo actual registra '
         'compras aceptadas por ingesta, no exclusivamente despachos autorizados. Las devoluciones no deshacen sus aristas.',
-        'El transporte del notebook es HTTP ASGI en proceso. La FIFO de ingesta no forma parte de esta ruta; '
-        'no se atribuye esta evidencia a un recorrido integrado de diez etapas.',
+        # Las evidencias anteriores a la FIFO en la ruta HTTP no traen sus estadísticas.
+        ('El transporte es HTTP ASGI en proceso. Los eventos pasan por la FIFO acotada de la API (etapa 0) '
+         f'y se procesan en {evidence["estadisticas"]["fifo"]["lotes"]} lotes (etapa 1); cada resultado de ingesta '
+         'incluye su recorrido de etapas. scripts/recorrido_evento.py muestra una orden atravesando las diez.'
+         if 'fifo' in evidence['estadisticas'] else
+         'El transporte es HTTP ASGI en proceso. La FIFO de ingesta no forma parte de esta ruta; '
+         'no se atribuye esta evidencia a un recorrido integrado de diez etapas.'),
     ])
     (output / 'resumen.md').write_text('\n\n'.join(notes) + '\n', encoding='utf-8')
     (figures_dir / 'pies.md').write_text('\n\n'.join(f'**{name}.** {caption}' for name, caption in captions) + '\n', encoding='utf-8')

@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import platform
 import random
+import statistics
 import subprocess
 import time
 
@@ -20,10 +21,12 @@ from fastapi.testclient import TestClient
 from API_SERVICIOS.config import Config
 from API_SERVICIOS.main import create_app
 from src.data.parquet_io import iter_events
+from src.analysis.plataforma import plataforma
 from src.data.prepare import digest_file
-from src.structures.graph import WeightedGraph, louvain, modularity, pagerank
+from src.structures.graph import (WeightedGraph, adjusted_rand_index, label_propagation, louvain, modularity,
+                                  normalized_mutual_info, pagerank)
 from src.structures.kd_tree import squared_distance
-from src.structures.minhash_lsh import jaccard
+from src.structures.minhash_lsh import LSHIndex, jaccard
 
 
 def recall_with_ties(scores, returned, k, higher=False):
@@ -188,7 +191,119 @@ def similarity_measurements(service, seed, k, queries, repetitions):
     return rows, neighbors, set_rows
 
 
-def graph_snapshot(system, expected_orders):
+# Semillas consecutivas desde la semilla del sistema para medir estabilidad de las particiones.
+SEMILLAS_ESTABILIDAD = 10
+ALGORITMOS_COMUNIDADES = {'louvain': louvain, 'label_propagation': label_propagation}
+
+
+def spread(values):
+    return statistics.stdev(values) if len(values) > 1 else None
+
+
+def timed(function, repetitions, *args, **kwargs):
+    """Resultado de la última ejecución y la latencia (ms) de cada repetición."""
+    samples, result = [], None
+    for _ in range(repetitions):
+        start = time.perf_counter_ns()
+        result = function(*args, **kwargs)
+        samples.append((time.perf_counter_ns() - start) / 1e6)
+    return result, samples
+
+
+def community_comparison(graph, base, samples, seed):
+    """Mismo subgrafo y población para todos los algoritmos: tamaño, calidad, tiempo y estabilidad."""
+    seeds = [seed + i for i in range(SEMILLAS_ESTABILIDAD)]
+    rows, per_seed = [], []
+    for name, algorithm in ALGORITMOS_COMUNIDADES.items():
+        partitions = [base[name] if s == seed else algorithm(graph, seed=s) for s in seeds]
+        runs = []
+        for s, partition in zip(seeds, partitions):
+            sizes = Counter(partition.values())
+            runs.append(dict(algoritmo=name, semilla=s, comunidades=len(sizes),
+                             modularidad=modularity(graph, partition) if partition else 0.0,
+                             mayor=max(sizes.values(), default=0)))
+        per_seed.extend(runs)
+        pairs = [(a, b) for i, a in enumerate(partitions) for b in partitions[i + 1:]]
+        nmi = [normalized_mutual_info(a, b) for a, b in pairs]
+        ari = [adjusted_rand_index(a, b) for a, b in pairs]
+        sizes = sorted(Counter(base[name].values()).values(), reverse=True)
+        rows.append(dict(algoritmo=name, comunidades=len(sizes),
+                         modularidad=modularity(graph, base[name]) if base[name] else 0.0,
+                         mayor=sizes[0] if sizes else 0, mediana=statistics.median(sizes) if sizes else 0,
+                         unitarias=sum(1 for n in sizes if n == 1),
+                         tiempo_ms_media=statistics.fmean(samples[name]), tiempo_ms_desv=spread(samples[name]),
+                         repeticiones=len(samples[name]), semillas=len(seeds),
+                         comunidades_semillas_media=statistics.fmean(r['comunidades'] for r in runs),
+                         comunidades_semillas_desv=spread([r['comunidades'] for r in runs]),
+                         modularidad_semillas_media=statistics.fmean(r['modularidad'] for r in runs),
+                         modularidad_semillas_desv=spread([r['modularidad'] for r in runs]),
+                         nmi_semillas_media=statistics.fmean(nmi) if nmi else None,
+                         nmi_semillas_min=min(nmi, default=None),
+                         ari_semillas_media=statistics.fmean(ari) if ari else None,
+                         ari_semillas_min=min(ari, default=None)))
+    return rows, per_seed
+
+
+# Barrido de calidad frente a latencia sobre los índices ya construidos: solo cambia
+# el parámetro de consulta (ef de HNSW) o el agrupamiento de las mismas firmas (LSH).
+EF_BUSQUEDA = (16, 32, 64, 128)
+LSH_BANDAS_FILAS = ((32, 2), (16, 4), (8, 8), (4, 16))
+K_BARRIDO = (5, 10)
+
+
+def quality_sweep(service, seed, queries, repetitions):
+    """Recall@K y latencia por consulta al variar ef de HNSW y bandas × filas de LSH."""
+    rng = random.Random(seed + 1)
+    rows = []
+    ids = sorted(service.vectores)
+    original_ef = service.hnsw.ef_search if service.hnsw else None
+    try:
+        for pid in rng.sample(ids, min(queries, len(ids))):
+            vector = service.vectores[pid]
+            scores = {p: math.sqrt(squared_distance(vector, v)) for p, v in service.vectores.items() if p != pid}
+            for ef in EF_BUSQUEDA:
+                service.hnsw.ef_search = ef
+                for k in K_BARRIDO:
+                    service.hnsw.search(vector, k, exclude=pid)  # calentamiento
+                    result, samples = timed(service.hnsw.search, repetitions, vector, k, exclude=pid)
+                    rows.append(dict(familia='vectorial', algoritmo='hnsw', parametro='ef_busqueda', valor=str(ef),
+                                     k=k, consulta=pid, candidatos=None,
+                                     recall_empates=recall_with_ties(scores, [p for p, _ in result], k),
+                                     latencia_ms_media=statistics.fmean(samples), latencia_ms_desv=spread(samples),
+                                     repeticiones=repetitions))
+    finally:
+        if service.hnsw:
+            service.hnsw.ef_search = original_ef
+    sets = service.usuarios_por_producto
+    signatures = service.lsh.signatures if service.lsh else {}
+    length = len(next(iter(signatures.values()), ()))
+    selected = rng.sample(sorted(sets), min(queries, len(sets)))
+    references = {pid: {p: jaccard(sets[pid], users) for p, users in sets.items() if p != pid} for pid in selected}
+    for bands, rows_per_band in LSH_BANDAS_FILAS:
+        if bands * rows_per_band != length:
+            continue
+        index = LSHIndex(bands, rows_per_band)
+        for key, signature in signatures.items():
+            index.insert(key, signature)
+        for pid in selected:
+            candidates = len(index.candidates(signatures[pid], exclude=pid))
+            ranked = sorted(references[pid].values(), reverse=True)
+            for k in K_BARRIDO:
+                index.query(pid, k)  # calentamiento
+                result, samples = timed(index.query, repetitions, pid, k)
+                kth = ranked[k - 1] if len(ranked) >= k else (ranked[-1] if ranked else 0.0)
+                rows.append(dict(familia='conjuntos', algoritmo='minhash_lsh', parametro='bandas_x_filas',
+                                 valor=f'{bands}x{rows_per_band}', k=k, consulta=pid, candidatos=candidates,
+                                 recall_empates=recall_with_ties(references[pid], [p for p, _ in result], k, True),
+                                 jaccard_k_esimo=kth,
+                                 # Probabilidad teórica de que LSH proponga un par con ese Jaccard: 1 − (1 − s^r)^b.
+                                 prob_colision_k_esimo=1 - (1 - kth ** rows_per_band) ** bands,
+                                 latencia_ms_media=statistics.fmean(samples), latencia_ms_desv=spread(samples),
+                                 repeticiones=repetitions))
+    return rows
+
+
+def graph_snapshot(system, expected_orders, repetitions=1):
     graph = system.cocompra.grafo
     actual = {tuple(sorted((u, v))): w for u, v, w in graph.edges()}
     expected = Counter(pair for products in expected_orders.values()
@@ -200,19 +315,24 @@ def graph_snapshot(system, expected_orders):
     # Conservar también el orden de inserción: con la misma semilla influye en Louvain.
     for u, v, w in graph.edges():
         analyzed.add_edge(u, v, w)
-    start = time.perf_counter_ns()
-    ranks = pagerank(analyzed)
-    pr_ms = (time.perf_counter_ns() - start) / 1e6
-    start = time.perf_counter_ns()
-    partition = louvain(analyzed, seed=system.config.semilla)
-    louvain_ms = (time.perf_counter_ns() - start) / 1e6
+    seed = system.config.semilla
+    ranks, pr_samples = timed(pagerank, repetitions, analyzed)
+    partition, louvain_samples = timed(louvain, repetitions, analyzed, seed=seed)
+    lp_partition, lp_samples = timed(label_propagation, repetitions, analyzed, seed=seed)
     api_ranks, api_partition, _ = system.cocompra._analisis()
     if partition != api_partition or ranks != api_ranks:
         raise AssertionError('La instantánea exportada no coincide con el análisis del servicio')
+    if lp_partition != system.cocompra._label_propagation()[0]:
+        raise AssertionError('Label Propagation no coincide con el servicio')
+    comparison, stability = community_comparison(
+        analyzed, dict(louvain=partition, label_propagation=lp_partition),
+        dict(louvain=louvain_samples, label_propagation=lp_samples), seed)
     counts = Counter(partition.values())
+    lp_counts = Counter(lp_partition.values())
     nodes = [dict(product_id=p, nombre=system.catalogo.registro(p)['nombre'],
                   vecinos=len(graph.neighbors(p)), grado_ponderado=graph.degree(p),
-                  comunidad=partition.get(p), pagerank=ranks.get(p), analizado=p in partition)
+                  comunidad=partition.get(p), comunidad_lp=lp_partition.get(p),
+                  pagerank=ranks.get(p), analizado=p in partition)
              for p in sorted(graph.nodes())]
     edges = [dict(producto_a=u, producto_b=v, ordenes_compartidas=w)
              for (u, v), w in sorted(actual.items())]
@@ -221,17 +341,29 @@ def graph_snapshot(system, expected_orders):
                    aislados=len(nodes) - len(partition), peso_total=graph.total_weight(),
                    grado_medio=2 * len(edges) / len(nodes) if nodes else 0,
                    componentes=len(graph.connected_components()),
-                   comunidades=len(counts), modularidad=modularity(analyzed, partition),
-                   pagerank_ms=pr_ms, louvain_ms=louvain_ms, repeticiones=1,
+                   comunidades=len(counts), modularidad=modularity(analyzed, partition) if partition else 0.0,
+                   comunidades_lp=len(lp_counts),
+                   modularidad_lp=modularity(analyzed, lp_partition) if lp_partition else 0.0,
+                   pagerank_ms=statistics.fmean(pr_samples), pagerank_ms_desv=spread(pr_samples),
+                   louvain_ms=statistics.fmean(louvain_samples), louvain_ms_desv=spread(louvain_samples),
+                   label_propagation_ms=statistics.fmean(lp_samples), label_propagation_ms_desv=spread(lp_samples),
+                   repeticiones=repetitions, semillas_estabilidad=SEMILLAS_ESTABILIDAD,
+                   nmi_louvain_lp=normalized_mutual_info(partition, lp_partition),
+                   ari_louvain_lp=adjusted_rand_index(partition, lp_partition),
                    sha256=hashlib.sha256(canonical.encode()).hexdigest(),
-                   pares_verificados=True, label_propagation='pendiente',
-                   semilla=system.config.semilla, pagerank_tol=1e-10, pagerank_max_iter=100)
+                   pares_verificados=True, semilla=seed, pagerank_tol=1e-10, pagerank_max_iter=100)
     return dict(resumen=summary, nodos=nodes, aristas=edges,
                 orden_nodos_analisis=list(analyzed.nodes()),
-                comunidades=[dict(comunidad=c, productos=n) for c, n in sorted(counts.items())])
+                comunidades=[dict(comunidad=c, productos=n) for c, n in sorted(counts.items())],
+                comunidades_lp=[dict(comunidad=c, productos=n) for c, n in sorted(lp_counts.items())],
+                comparacion_comunidades=comparison, estabilidad_comunidades=stability,
+                tiempos_grafo=[dict(algoritmo=name, repeticion=i, latencia_ms=ms)
+                               for name, samples in (('pagerank', pr_samples), ('louvain', louvain_samples),
+                                                     ('label_propagation', lp_samples))
+                               for i, ms in enumerate(samples)])
 
 
-def collect_demo(data_dir, seed=2026, k=5, queries=5, repetitions=5, progress=print):
+def collect_demo(data_dir, seed=2026, k=10, queries=10, repetitions=100, progress=print):
     """Reproduce todos los eventos del Parquet en una aplicación nueva, sin precarga."""
     if min(k, queries, repetitions) < 1:
         raise ValueError('k, consultas y repeticiones deben ser positivos')
@@ -313,7 +445,9 @@ def collect_demo(data_dir, seed=2026, k=5, queries=5, repetitions=5, progress=pr
         progress('Comparando índices con referencias exactas y exportando el grafo completo…')
         timings, neighbors, set_neighbors = similarity_measurements(
             system.recomendacion, seed, k, queries, repetitions)
-        snapshot = graph_snapshot(system, orders)
+        progress('Barrido de parámetros de HNSW y LSH (recall@5 y recall@10)…')
+        sweep = quality_sweep(system.recomendacion, seed, queries, repetitions)
+        snapshot = graph_snapshot(system, orders, repetitions)
         stats = q('GET', '/admin/estadisticas')
 
     root = Path(__file__).resolve().parents[2]
@@ -330,6 +464,7 @@ def collect_demo(data_dir, seed=2026, k=5, queries=5, repetitions=5, progress=pr
     settings['reconstruir_cada_seg'] = 'infinito; reconstrucción explícita'
     return dict(metadata=dict(fecha_utc=datetime.now(timezone.utc).isoformat(),
                               plataforma=platform.platform(), python=platform.python_version(),
+                              plataforma_detalle=plataforma(),
                               semilla=seed, k=k, consultas=queries, repeticiones_consulta=repetitions,
                               datos=str(data_dir), archivos_sha256=inputs,
                               codigo_sha256={str(p.relative_to(root)): digest_file(p) for p in code_paths},
@@ -341,7 +476,8 @@ def collect_demo(data_dir, seed=2026, k=5, queries=5, repetitions=5, progress=pr
                 fuente=dict(filas=source_rows, tipos=dict(source_types), origenes=dict(origins),
                             estados=dict(statuses)), control=controlled, consultas=records,
                 evolucion_grafo=evolution, grafo=snapshot, mediciones=timings,
-                vecinos=neighbors, vecinos_conjuntos=set_neighbors, pagos_historico=payment_rows,
+                vecinos=neighbors, vecinos_conjuntos=set_neighbors, barrido_similitud=sweep,
+                pagos_historico=payment_rows,
                 servicio=dict(product_id=pid, user_id=uid, termino=term, producto=product,
                               busqueda=search, rango=prices, similares=api_neighbors,
                               complementarios=complements, recomendaciones=recommendations, panel=panel),

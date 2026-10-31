@@ -1,4 +1,6 @@
 """Co-compra: pares, productos influyentes y comunidades."""
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Query
 
 from . import o_404, sistema
@@ -19,10 +21,11 @@ def influyentes(k: int = Query(10, ge=1, le=200), s=Depends(sistema)):
                 for i in s.cocompra.influyentes(k)]
 
 
-@router.get('/comunidades', summary='Agrupaciones de consumo (Louvain)')
-def comunidades(min_tamano: int = Query(3, ge=1), limite: int = Query(20, ge=1, le=500), s=Depends(sistema)):
+@router.get('/comunidades', summary='Agrupaciones de consumo (Louvain o Label Propagation)')
+def comunidades(min_tamano: int = Query(3, ge=1), limite: int = Query(20, ge=1, le=500),
+                metodo: Literal['louvain', 'label_propagation'] = 'louvain', s=Depends(sistema)):
     with s.lock:
-        return s.cocompra.comunidades(min_tamano, limite)
+        return s.cocompra.comunidades(min_tamano, limite, metodo=metodo)
 
 
 @router.get('/productos/{product_id}/cross-selling', summary='Cross-selling para un producto')

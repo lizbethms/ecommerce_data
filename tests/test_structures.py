@@ -9,7 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.structures.bloom import BloomFilter
 from src.structures.bplus_tree import BPlusTree
 from src.structures.count_min import CountMinSketch, WindowedCMS
-from src.structures.graph import WeightedGraph, louvain, modularity, pagerank
+from src.structures.graph import (WeightedGraph, adjusted_rand_index, label_propagation, louvain, modularity,
+                                  normalized_mutual_info, pagerank)
 from src.structures.hash_table import HashTable
 from src.structures.heap import MinHeap
 from src.structures.hnsw import HNSW
@@ -208,6 +209,31 @@ class TestStructures(unittest.TestCase):
         self.assertEqual(len(set(partition.values())), 2)
         self.assertEqual(len({partition[u] for u in range(6)}), 1)
         self.assertGreater(modularity(graph, partition), 0.4)
+
+    def test_label_propagation_y_comparacion_de_particiones(self):
+        graph = WeightedGraph()
+        for group in (range(0, 6), range(6, 12)):
+            for u in group:
+                for v in group:
+                    if u < v:
+                        graph.add_edge(u, v, 3)
+        graph.add_edge(0, 6, 1)
+        partition = label_propagation(graph, seed=7)
+        self.assertEqual(len(set(partition.values())), 2)
+        self.assertEqual(len({partition[u] for u in range(6)}), 1)
+        self.assertEqual(partition, label_propagation(graph, seed=7))  # reproducible con la misma semilla
+        louvain_partition = louvain(graph)
+        self.assertAlmostEqual(normalized_mutual_info(partition, louvain_partition), 1.0)
+        self.assertAlmostEqual(adjusted_rand_index(partition, louvain_partition), 1.0)
+        # Valores conocidos: etiquetas permutadas son la misma agrupación; cruzadas no comparten información.
+        a, b = {0: 0, 1: 0, 2: 1, 3: 1}, {0: 1, 1: 1, 2: 0, 3: 0}
+        self.assertAlmostEqual(normalized_mutual_info(a, b), 1.0)
+        self.assertAlmostEqual(adjusted_rand_index(a, b), 1.0)
+        cruzada = {0: 0, 1: 1, 2: 0, 3: 1}
+        self.assertAlmostEqual(normalized_mutual_info(a, cruzada), 0.0)
+        self.assertAlmostEqual(adjusted_rand_index(a, cruzada), -0.5)
+        with self.assertRaises(ValueError):
+            normalized_mutual_info(a, {0: 0})
 
     def test_trie(self):
         trie = Trie()
