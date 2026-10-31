@@ -42,10 +42,10 @@ Un evento entra por `POST /eventos/lote` y queda en una FIFO acotada (etapa 0, [
 
 | Integrante | Responsabilidad principal | Aporte concreto |
 |---|---|---|
-| Lizbeth Mamani Salce | Etapas 0 y 1; introducción | |
-| Karen Vargas García | Etapas 2 y 3 | |
-| Jhon Campos Arteaga | Etapas 4, 5 y 6 | |
-| Nicolas Trelles Vizcarra | Etapas 7, 8 y 9; conclusiones | |
+| Lizbeth Mamani Salce | Etapas 0 y 1; introducción | FIFO acotada con contrapresión en la ruta HTTP y réplica aislada (`canal.py`, `runner.py`); merge sort y deduplicación por hash en la ingesta; preparación de datos reales y sintéticos por escala; protocolo de 100 repeticiones y registro de plataforma; campaña de memoria |
+| Karen Vargas García | Etapas 2 y 3 | MinHeap con política EDF y prioridad de alertas; tabla hash, caché LRU y matriz dispersa; campaña de tiempos log-log de las estructuras base con contraste frente a la complejidad esperada; pruebas de prioridades y caché |
+| Jhon Campos Arteaga | Etapas 4, 5 y 6 | B+Tree para rangos por precio y tiempo; KD-Tree como KNN exacto; Bloom Filter y Count-Min Sketch por ventanas; comparación con estructuras exactas (falsos positivos frente a la tasa teórica, error de CMS frente a la cota ε·N, tiempo y memoria) |
+| Nicolas Trelles Vizcarra | Etapas 7, 8 y 9; conclusiones | MinHash + LSH y HNSW con barrido de parámetros y recall@K; grafo de co-compra con PageRank, Louvain y Label Propagation (estabilidad con NMI y ARI); API FastAPI, dashboard, Trie y Top-K; recorrido de una orden por las diez etapas |
 
 ## 1. Instalar y preparar el entorno
 
@@ -176,7 +176,7 @@ python scripts/benchmark_tiempos.py \
 - Las tablas incluyen `tiempos_pendientes.csv` (exponente log-log observado frente al esperado), `probabilisticas_vs_exactas.csv`, `calidad_bloom.csv` y `calidad_cms.csv`.
 - Las figuras son `tiempos_construccion`, `tiempos_operacion` y `calidad_probabilisticas`.
 
-Corre todas las campañas en la misma máquina para que los tiempos sean comparables.
+Corre todas las campañas en la misma máquina para que los tiempos sean comparables. `bash scripts/campana_final.sh` las ejecuta en secuencia para las cinco escalas: informes técnicos, tiempos, memoria y figuras. Es reanudable: salta los pasos completos y registra su avance en `results/campana_final.log`.
 
 ## 5. Iniciar la API, el dashboard y el tráfico
 

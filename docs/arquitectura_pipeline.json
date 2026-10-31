@@ -4,13 +4,13 @@
   "meta": {
     "title": "Pipeline de eventos de e-commerce: etapas 0–9",
     "locale": "es",
-    "output": ".archify/architecture-pipeline-ecommerce-20261030-215530/arquitectura_pipeline.html",
+    "output": ".archify/architecture-pipeline-ecommerce-20261030-231131/arquitectura_pipeline.html",
     "quality_profile": "showcase",
     "repository": {
       "url": "https://github.com/lizbethms/ecommerce_data.git",
       "provider": "github",
       "link_mode": "web",
-      "revision": "0da367aacd974932641984243689a141a38fe3fd"
+      "revision": "c590646b89a264a4ecbf4ac3ac931de91e6862a5"
     },
     "translations": {
       "page.title": "{title} · Diagrama",
@@ -461,7 +461,7 @@
       "sublabel": "eventos REES46 originales",
       "pos": [
         120,
-        50
+        10
       ],
       "size": [
         200,
@@ -483,7 +483,7 @@
       "sublabel": "reales + 20 % sintéticos",
       "pos": [
         120,
-        180
+        115
       ],
       "size": [
         200,
@@ -509,7 +509,7 @@
       "sublabel": "events.parquet · catálogo · SQLite",
       "pos": [
         120,
-        311
+        231
       ],
       "size": [
         200,
@@ -527,12 +527,12 @@
     {
       "id": "replay",
       "type": "backend",
-      "label": "Réplica FIFO",
-      "sublabel": "BoundedFIFO → eventos.jsonl",
+      "label": "Réplica FIFO aislada",
+      "sublabel": "mide la cola desde archivo",
       "tag": "Etapa 0",
       "pos": [
         120,
-        480
+        420
       ],
       "size": [
         200,
@@ -560,7 +560,7 @@
       "sublabel": "envía lotes por HTTP",
       "pos": [
         440,
-        315
+        235
       ],
       "size": [
         170,
@@ -580,24 +580,58 @@
       ]
     },
     {
+      "id": "fifo",
+      "type": "messagebus",
+      "label": "FIFO de ingesta",
+      "sublabel": "BoundedFIFO · contrapresión",
+      "tag": "Etapa 0",
+      "pos": [
+        760,
+        230
+      ],
+      "size": [
+        190,
+        70
+      ],
+      "sources": [
+        {
+          "path": "API_SERVICIOS/canal.py",
+          "line": 25,
+          "end_line": 90,
+          "label": "CanalIngesta"
+        },
+        {
+          "path": "API_SERVICIOS/rutas/eventos.py",
+          "line": 11,
+          "end_line": 24
+        },
+        {
+          "path": "API_SERVICIOS/main.py",
+          "line": 18,
+          "end_line": 23,
+          "label": "consumidor en lifespan"
+        }
+      ]
+    },
+    {
       "id": "ingesta",
       "type": "backend",
       "label": "Ingesta",
       "sublabel": "valida · merge sort · hash",
-      "tag": "Etapas 0–1",
+      "tag": "Etapa 1",
       "pos": [
         760,
-        245
+        360
       ],
       "size": [
         190,
-        200
+        150
       ],
       "sources": [
         {
           "path": "API_SERVICIOS/servicios/ingesta.py",
           "line": 93,
-          "end_line": 139,
+          "end_line": 140,
           "label": "recibir_lote()"
         },
         {
@@ -605,11 +639,6 @@
           "line": 26,
           "end_line": 27,
           "label": "orden de suscriptores"
-        },
-        {
-          "path": "API_SERVICIOS/rutas/eventos.py",
-          "line": 11,
-          "end_line": 18
         }
       ]
     },
@@ -709,7 +738,7 @@
       "id": "cocompra",
       "type": "backend",
       "label": "Co-compra",
-      "sublabel": "grafo · PageRank · Louvain",
+      "sublabel": "PageRank · Louvain · LP",
       "tag": "Etapa 8",
       "pos": [
         1040,
@@ -722,13 +751,13 @@
       "sources": [
         {
           "path": "API_SERVICIOS/servicios/cocompra.py",
-          "line": 27,
-          "end_line": 50
+          "line": 30,
+          "end_line": 61
         },
         {
           "path": "API_SERVICIOS/rutas/cocompra.py",
-          "line": 9,
-          "end_line": 33
+          "line": 11,
+          "end_line": 36
         }
       ]
     },
@@ -845,8 +874,8 @@
       "sources": [
         {
           "path": "API_SERVICIOS/main.py",
-          "line": 25,
-          "end_line": 34,
+          "line": 34,
+          "end_line": 44,
           "label": "recorrido sugerido"
         }
       ]
@@ -888,6 +917,7 @@
       "kind": "region",
       "label": "API FastAPI · SistemaEcommerce (estado en memoria)",
       "wraps": [
+        "fifo",
         "ingesta",
         "catalogo",
         "fraude",
@@ -925,11 +955,17 @@
       "label": "events.parquet"
     },
     {
-      "id": "cliente-ingesta",
+      "id": "cliente-fifo",
       "from": "cliente",
-      "to": "ingesta",
+      "to": "fifo",
       "label": "POST /eventos/lote",
       "variant": "emphasis"
+    },
+    {
+      "id": "fifo-ingesta",
+      "from": "fifo",
+      "to": "ingesta",
+      "label": "lotes"
     },
     {
       "id": "ingesta-catalogo",
@@ -1003,17 +1039,17 @@
       "dot": "emerald",
       "title": "Recorrido de un evento",
       "items": [
-        "Ingesta normaliza, valida, ordena el lote con merge sort y descarta duplicados con una tabla hash",
+        "Cada evento espera en la FIFO acotada; si está llena, la petición espera (contrapresión)",
+        "Un consumidor forma lotes: merge sort y deduplicación con tabla hash",
         "Los aceptados se despachan en orden temporal a los 7 servicios, siempre en el mismo orden",
-        "Cada servicio filtra sus tipos: fraude solo payment_attempt; co-compra solo purchase",
-        "Una alerta de fraude entra al heap con clase 0 y se atiende antes que las órdenes"
+        "Cada respuesta incluye su recorrido de etapas; una orden (pago + compras) recorre las 10"
       ]
     },
     {
       "dot": "amber",
       "title": "Fuera del recorrido HTTP",
       "items": [
-        "La réplica FIFO (etapa 0) escribe eventos.jsonl y no envía eventos a la API",
+        "La réplica FIFO mide la misma cola de forma aislada, leyendo desde archivo",
         "Al iniciar, la API carga catalog, inventory y flags.parquet",
         "KD-Tree, HNSW y LSH se reconstruyen en diferido; usan el catálogo y la matriz dispersa"
       ]
@@ -1022,7 +1058,7 @@
       "dot": "violet",
       "title": "Etapas por servicio",
       "items": [
-        "0–1 Ingesta · 2 Priorización · 3 Catálogo y matriz dispersa",
+        "0 FIFO de ingesta · 1 Ingesta · 2 Priorización · 3 Catálogo y matriz dispersa",
         "4 B+Tree (catálogo y panel) · 5 KD-Tree · 6 Fraude",
         "7 MinHash/LSH y HNSW · 8 Co-compra · 9 Búsqueda, panel y dashboard"
       ]
