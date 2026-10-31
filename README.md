@@ -12,6 +12,13 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
+En caso usar bash:
+```sh
+python -m venv .venv
+source .venv/Scripts/activate
+python -m pip install -r requirements.txt
+```
+
 Coloca el archivo original `10M.csv` en la raíz. En cada terminal nueva, activa el entorno con `source .venv/bin/activate`.
 
 ## 2. Generar los datos

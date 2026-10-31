@@ -1,6 +1,5 @@
 # Fuente REES46 y artefactos regenerables
-data/*.csv
-data/prepared*/
+/data/
 results/
 __pycache__/
 *.pyc

@@ -4,9 +4,17 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-PYTHON_EXEC="${PYTHON_BIN:-$PROJECT_ROOT/.venv/bin/python}"
-if [[ -z "${PYTHON_BIN:-}" && ! -x "$PYTHON_EXEC" ]]; then
+# Busca el venv en .venv/bin (Linux/macOS) o .venv/Scripts (Windows); si no, usa python3 o python.
+if [[ -n "${PYTHON_BIN:-}" ]]; then
+  PYTHON_EXEC="$PYTHON_BIN"
+elif [[ -x "$PROJECT_ROOT/.venv/bin/python" ]]; then
+  PYTHON_EXEC="$PROJECT_ROOT/.venv/bin/python"
+elif [[ -x "$PROJECT_ROOT/.venv/Scripts/python.exe" ]]; then
+  PYTHON_EXEC="$PROJECT_ROOT/.venv/Scripts/python.exe"
+elif python3 -c '' >/dev/null 2>&1; then
   PYTHON_EXEC=python3
+else
+  PYTHON_EXEC=python
 fi
 
 exec "$PYTHON_EXEC" "$PROJECT_ROOT/scripts/data_pipeline.py" \
